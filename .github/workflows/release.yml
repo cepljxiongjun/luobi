@@ -1,0 +1,42 @@
+name: Release Desktop
+
+# 打 v 开头的 tag(如 v0.1.0)自动打包桌面安装程序并创建 GitHub Release 草稿
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-tauri:
+    name: 打包 Windows 安装程序
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建并发布
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "落笔 ${{ github.ref_name }}"
+          releaseBody: "见下方附件:Windows 安装程序(.msi / .exe)"
+          releaseDraft: true
+          prerelease: false
