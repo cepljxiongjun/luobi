@@ -1,0 +1,36 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+dist-ssr/
+
+# Tauri(Rust 编译产物与自动生成文件,src-tauri/.gitignore 也有兜底)
+src-tauri/target/
+src-tauri/gen/
+
+# 本地环境变量(API Key 等敏感信息,勿提交)
+.env
+.env.local
+.env.*.local
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 编辑器 / 系统文件
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Claude Code 本地会话配置
+.claude/settings.local.json
