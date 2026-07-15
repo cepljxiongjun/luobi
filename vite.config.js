@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 // 本地 LLM 代理:前端把真实目标地址放在 x-proxy-target 头里 POST 到 /llm-proxy,
 // 由 Vite 开发服务器在 Node 侧转发,绕开浏览器 CORS 限制(生产部署需自备后端代理)
@@ -41,6 +42,6 @@ function llmProxy() {
 }
 
 export default defineConfig({
-  plugins: [react(), llmProxy()],
+  plugins: [react(), tailwindcss(), llmProxy()],
   server: { port: 5173 },
 });
