@@ -66,6 +66,9 @@ export default function ImageTextPage() {
     itThemeId, setItThemeId, itRatioId, setItRatioId, itFontId, setItFontId,
     itRatio, itCards, itLoading, itError, itNote, itCopied,
     itImportDraft, itSplit, itExportAll, itCopyText,
+    itMode, setItMode, itTopic, setItTopic, itRefNote, setItRefNote, itGenerate,
+    itTitles, itTitlesLoading, itGenTitles, itPickTitle,
+    itCaption, itCaptionLoading, itCaptionCopied, itGenCaption, itCopyCaption,
   } = useApp();
 
   return (
@@ -74,19 +77,44 @@ export default function ImageTextPage() {
       {/* 左栏:图文设置 */}
       <aside className="flex min-h-0 flex-col gap-5 overflow-y-auto pr-1">
         <section>
-          <div className={sectionLabelCls + " mb-2.5"}>文章来源</div>
-          <textarea value={itSource} onChange={e => setItSource(e.target.value)}
-            placeholder="粘贴要做成图文的文章,或点下方按钮从写作模块带入……" rows={7}
-            className="box-border w-full resize-y rounded-md border border-line bg-white px-3 py-2.5 font-sans text-[13px] leading-[1.8] text-ink" />
-          <div className="mt-2 flex gap-2">
-            <button onClick={itImportDraft} disabled={!content.trim() && !docTitle.trim()}
-              className={btnCls + " rounded-full px-3 py-[5px] text-xs"}>
-              ← 带入写作草稿
-            </button>
-            <span className="self-center text-[11px] text-ink-faint">
-              {itSource.trim() ? `${itSource.replace(/\s/g, "").length} 字` : ""}
-            </span>
+          <div className={sectionLabelCls + " mb-2.5"}>内容来源</div>
+          {/* 两种生成方式:已有文章拆卡 / 主题直出(调研:ai-xiaohs 灵感创作 + 爆款仿写) */}
+          <div className="mb-2.5 grid grid-cols-2 gap-2">
+            {[{ id: "article", name: "已有文章", desc: "粘贴或带入草稿拆卡" },
+              { id: "topic", name: "主题直出", desc: "输入主题一键生成" }].map(m => (
+              <button key={m.id} onClick={() => setItMode(m.id)}
+                className={chipCls(itMode === m.id) + " px-3 py-[9px]"}>
+                <div className={"text-[13px] font-semibold " + (itMode === m.id ? "text-indigo" : "text-ink")}>{m.name}</div>
+                <div className="mt-0.5 text-[10px] text-ink-faint">{m.desc}</div>
+              </button>
+            ))}
           </div>
+
+          {itMode === "article" ? (
+            <>
+              <textarea value={itSource} onChange={e => setItSource(e.target.value)}
+                placeholder="粘贴要做成图文的文章,或点下方按钮从写作模块带入……" rows={7}
+                className="box-border w-full resize-y rounded-md border border-line bg-white px-3 py-2.5 font-sans text-[13px] leading-[1.8] text-ink" />
+              <div className="mt-2 flex gap-2">
+                <button onClick={itImportDraft} disabled={!content.trim() && !docTitle.trim()}
+                  className={btnCls + " rounded-full px-3 py-[5px] text-xs"}>
+                  ← 带入写作草稿
+                </button>
+                <span className="self-center text-[11px] text-ink-faint">
+                  {itSource.trim() ? `${itSource.replace(/\s/g, "").length} 字` : ""}
+                </span>
+              </div>
+            </>
+          ) : (
+            <>
+              <textarea value={itTopic} onChange={e => setItTopic(e.target.value)}
+                placeholder={"想做什么主题的图文?比如:\n「租房避坑的8条经验」「新手健身一周计划」"} rows={3}
+                className="box-border w-full resize-y rounded-md border border-line bg-white px-3 py-2.5 font-sans text-[13px] leading-[1.8] text-ink" />
+              <textarea value={itRefNote} onChange={e => setItRefNote(e.target.value)}
+                placeholder="(可选)粘贴一篇参考爆款笔记,AI 只仿它的结构和写法,不抄内容" rows={4}
+                className="mt-2 box-border w-full resize-y rounded-md border border-dashed border-line bg-white px-3 py-2.5 font-sans text-xs leading-[1.8] text-ink placeholder:text-ink-faint" />
+            </>
+          )}
         </section>
 
         <section>
@@ -135,16 +163,27 @@ export default function ImageTextPage() {
         </section>
 
         <section className="flex flex-col gap-2">
-          <button onClick={() => itSplit(true)} disabled={itLoading || !itSource.trim()}
-            className="cursor-pointer rounded-lg border-none bg-indigo py-[11px] text-sm font-semibold tracking-[2px] text-white
-              disabled:cursor-default disabled:opacity-50
-              focus-visible:outline-2 focus-visible:outline-indigo focus-visible:outline-offset-2">
-            {itLoading ? "拆分中…" : "AI 拆分成卡片"}
-          </button>
-          <button onClick={() => itSplit(false)} disabled={itLoading || !itSource.trim()}
-            className={btnCls + " rounded-lg py-2 text-xs"}>
-            不用模型,本地快速拆分
-          </button>
+          {itMode === "article" ? (
+            <>
+              <button onClick={() => itSplit(true)} disabled={itLoading || !itSource.trim()}
+                className="cursor-pointer rounded-lg border-none bg-indigo py-[11px] text-sm font-semibold tracking-[2px] text-white
+                  disabled:cursor-default disabled:opacity-50
+                  focus-visible:outline-2 focus-visible:outline-indigo focus-visible:outline-offset-2">
+                {itLoading ? "拆分中…" : "AI 拆分成卡片"}
+              </button>
+              <button onClick={() => itSplit(false)} disabled={itLoading || !itSource.trim()}
+                className={btnCls + " rounded-lg py-2 text-xs"}>
+                不用模型,本地快速拆分
+              </button>
+            </>
+          ) : (
+            <button onClick={itGenerate} disabled={itLoading || !itTopic.trim()}
+              className="cursor-pointer rounded-lg border-none bg-indigo py-[11px] text-sm font-semibold tracking-[2px] text-white
+                disabled:cursor-default disabled:opacity-50
+                focus-visible:outline-2 focus-visible:outline-indigo focus-visible:outline-offset-2">
+              {itLoading ? "生成中…" : (itRefNote.trim() ? "AI 仿写生成图文" : "AI 生成图文卡片")}
+            </button>
+          )}
           {itError && <div className="text-xs text-seal">{itError}</div>}
           {itNote && !itError && <div className="text-[11px] leading-relaxed text-ink-faint">{itNote}</div>}
         </section>
@@ -155,6 +194,19 @@ export default function ImageTextPage() {
         <div className="flex flex-wrap items-center gap-2">
           <span className={sectionLabelCls}>卡片预览</span>
           {itCards && <span className="text-xs text-ink-faint">封面 + {itCards.pages.length} 页</span>}
+          {/* AI 增强:标题打磨 / 发布文案(有卡片后可用) */}
+          {itCards && (
+            <>
+              <button onClick={itGenTitles} disabled={itTitlesLoading || itLoading}
+                className={btnCls + " rounded-2xl px-3 py-1.5 text-xs"}>
+                {itTitlesLoading ? "构思中…" : "换个封面标题"}
+              </button>
+              <button onClick={itGenCaption} disabled={itCaptionLoading || itLoading}
+                className={btnCls + " rounded-2xl px-3 py-1.5 text-xs"}>
+                {itCaptionLoading ? "撰写中…" : "生成发布文案"}
+              </button>
+            </>
+          )}
           <button onClick={itCopyText} disabled={!itCards}
             className={btnCls + " ml-auto rounded-2xl px-3.5 py-1.5 text-xs " +
               (itCopied ? "border-indigo bg-indigo-bg text-indigo" : "")}>
@@ -165,6 +217,41 @@ export default function ImageTextPage() {
             下载全部图片
           </button>
         </div>
+
+        {/* 封面标题候选:点击即替换封面 */}
+        {itTitles.length > 0 && itCards && (
+          <div className="rounded-[10px] border border-line bg-paper-deep px-3.5 py-3">
+            <div className="mb-2 text-[11px] tracking-[2px] text-ink-faint">封面标题候选 · 点击替换</div>
+            <div className="flex flex-wrap gap-1.5">
+              {itTitles.map((t, i) => {
+                const picked = itCards.cover.title === t;
+                return (
+                  <button key={i} onClick={() => itPickTitle(t)}
+                    className={"cursor-pointer rounded-full border px-3 py-1.5 text-xs transition-all " +
+                      (picked ? "border-indigo bg-indigo-bg font-semibold text-indigo"
+                        : "border-line bg-white text-ink hover:border-indigo hover:text-indigo")}>
+                    {picked && "✓ "}{t}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 发布文案:发图时直接粘贴 */}
+        {itCaption && (
+          <div className="rounded-[10px] border border-line bg-paper-deep px-3.5 py-3">
+            <div className="mb-1.5 flex items-center">
+              <span className="text-[11px] tracking-[2px] text-ink-faint">发布文案(配图使用)</span>
+              <button onClick={itCopyCaption}
+                className={btnCls + " ml-auto rounded-full px-3 py-1 text-[11px] " +
+                  (itCaptionCopied ? "border-indigo bg-indigo-bg text-indigo" : "")}>
+                {itCaptionCopied ? "已复制 ✓" : "复制文案"}
+              </button>
+            </div>
+            <div className="text-xs leading-[1.9] whitespace-pre-wrap text-ink">{itCaption}</div>
+          </div>
+        )}
 
         <div className="min-h-0 flex-1 overflow-y-auto rounded-[10px] border border-line bg-white p-[18px]">
           {!itCards ? (

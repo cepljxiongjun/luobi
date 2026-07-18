@@ -46,6 +46,15 @@ export function AppProvider({ children }) {
   const [itError, setItError] = useState("");
   const [itNote, setItNote] = useState("");            // 拆卡方式说明(AI / 本地兜底)
   const [itCopied, setItCopied] = useState(false);
+  // AI 生成(调研对标 ai-xiaohs:主题直出 / 爆款仿写 / 标题优化 / 发布文案)
+  const [itMode, setItMode] = useState("article");     // 'article' 已有文章拆卡 | 'topic' 主题直出
+  const [itTopic, setItTopic] = useState("");          // 主题直出:主题输入
+  const [itRefNote, setItRefNote] = useState("");      // 主题直出:参考爆款笔记(可选,仿其结构风格)
+  const [itTitles, setItTitles] = useState([]);        // 封面标题候选
+  const [itTitlesLoading, setItTitlesLoading] = useState(false);
+  const [itCaption, setItCaption] = useState("");      // 发布文案(caption + 话题标签)
+  const [itCaptionLoading, setItCaptionLoading] = useState(false);
+  const [itCaptionCopied, setItCaptionCopied] = useState(false);
 
   // ---- 设置持久化:启动时水合,变更后防抖保存 ----
   const [hydrated, setHydrated] = useState(false);
@@ -226,7 +235,7 @@ export function AppProvider({ children }) {
 
   const itSplit = async (useAI) => {
     if (!itSource.trim()) { setItError("先粘贴文章,或从写作模块带入"); return; }
-    setItError(""); setItNote("");
+    setItError(""); setItNote(""); setItTitles([]); setItCaption("");
     if (!useAI) {
       setItCards(localSplitCards(itSource, docTitle.trim() || undefined));
       setItNote("本地快速拆分(未用模型)");
@@ -249,6 +258,79 @@ export function AppProvider({ children }) {
       setItNote(`模型拆分未成功(${(e.message || "格式异常").slice(0, 40)}),已用本地拆分兜底`);
     }
     setItLoading(false);
+  };
+
+  // 主题直出:不需要现成文章,输入主题直接生成整组卡片;可选粘贴参考爆款只仿其结构
+  const itGenerate = async () => {
+    if (!itTopic.trim()) { setItError("先写下主题,比如「租房避坑指南」"); return; }
+    setItError(""); setItNote(""); setItTitles([]); setItCaption("");
+    setItLoading(true);
+    try {
+      const ref = itRefNote.trim()
+        ? `\n\n参考下面这篇爆款笔记的结构、节奏与表达风格(只学结构和写法,不要抄它的内容):\n${itRefNote.trim().slice(0, 2000)}`
+        : "";
+      const raw = await callAI(
+        `请围绕主题「${itTopic.trim()}」创作一组小红书图文笔记卡片,内容要具体、有信息量、口语化有网感。` +
+        `只返回JSON,不要markdown代码块,格式:\n` +
+        `{"cover":{"title":"12-20字有点击欲的主标题","tag":"4-8字亮点标签"},"pages":[{"heading":"每页小标题,8字内","points":["每页2-4条要点,每条20-40字"]}]}\n` +
+        `pages 共 3-6 页。${ref}`,
+        "你是资深小红书图文笔记创作者,擅长把一个主题拆解成有传播力的分页卡片。", apiConfig()
+      );
+      const cards = normalizeCards(JSON.parse(raw.replace(/```json|```/g, "").trim()));
+      if (!cards) throw new Error("返回格式异常");
+      setItCards(cards);
+      setItNote(itRefNote.trim() ? "已按参考笔记的结构生成,可换标题、配发布文案" : "AI 生成完成,可换标题、配发布文案");
+    } catch (e) {
+      setItError(`生成失败:${(e.message || "请重试").slice(0, 80)}`);
+    }
+    setItLoading(false);
+  };
+
+  // 封面标题打磨:基于已生成的卡片出 5 个候选,点击替换
+  const itGenTitles = async () => {
+    if (!itCards) return;
+    setItError(""); setItTitlesLoading(true);
+    try {
+      const src = `${itCards.cover.title}\n${itCards.pages.map(p => `${p.heading}:${p.points.join(";")}`).join("\n")}`;
+      const raw = await callAI(
+        `根据下面这组图文卡片的内容,给封面想5个更有点击欲的小红书标题(12-20字,可带1个emoji,不做标题党)。` +
+        `只返回JSON数组:["标题1","标题2","标题3","标题4","标题5"],不要markdown代码块。\n\n${src}`,
+        "你是小红书爆款标题专家。", apiConfig()
+      );
+      const arr = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      if (!Array.isArray(arr) || arr.length === 0) throw new Error("返回格式异常");
+      setItTitles(arr.map(x => String(x).trim().slice(0, 30)).filter(Boolean).slice(0, 5));
+    } catch (e) { setItError(`标题生成失败:${(e.message || "请重试").slice(0, 80)}`); }
+    setItTitlesLoading(false);
+  };
+
+  const itPickTitle = (t) => {
+    if (!itCards) return;
+    setItCards({ ...itCards, cover: { ...itCards.cover, title: t } });
+  };
+
+  // 发布文案:发图时配的 caption + 话题标签
+  const itGenCaption = async () => {
+    if (!itCards) return;
+    setItError(""); setItCaptionLoading(true);
+    try {
+      const src = `${itCards.cover.title}\n${itCards.pages.map(p => `${p.heading}:${p.points.join(";")}`).join("\n")}`;
+      const text = await callAI(
+        `根据下面这组图文卡片,写一段发布时配的小红书正文文案:100-180字,口语化有网感,分2-3小段,` +
+        `适度用emoji,结尾另起一行给4-6个话题标签(#开头,空格分隔)。直接输出文案本身。\n\n${src}`,
+        "你是小红书运营,擅长写高互动的笔记配文。", apiConfig()
+      );
+      setItCaption(text);
+    } catch (e) { setItError(`文案生成失败:${(e.message || "请重试").slice(0, 80)}`); }
+    setItCaptionLoading(false);
+  };
+
+  const itCopyCaption = async () => {
+    if (!itCaption) return;
+    try {
+      await navigator.clipboard.writeText(itCaption);
+      setItCaptionCopied(true); setTimeout(() => setItCaptionCopied(false), 1600);
+    } catch { /* 剪贴板不可用时静默 */ }
   };
 
   const itDrawOpts = (pageIndex) => ({
@@ -312,6 +394,9 @@ export function AppProvider({ children }) {
     itThemeId, setItThemeId, itRatioId, setItRatioId, itFontId, setItFontId,
     itTheme, itRatio, itScale, itCards, itLoading, itError, itNote, itCopied,
     itImportDraft, itSplit, itExportOne, itExportAll, itCopyText,
+    itMode, setItMode, itTopic, setItTopic, itRefNote, setItRefNote,
+    itGenerate, itTitles, itTitlesLoading, itGenTitles, itPickTitle,
+    itCaption, itCaptionLoading, itCaptionCopied, itGenCaption, itCopyCaption,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
