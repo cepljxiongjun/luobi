@@ -1,9 +1,9 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
-import { MODELS, callAI } from "./lib/api";
+import { MODELS, callAI, callAIStream } from "./lib/api";
 import { PLATFORMS, TONES } from "./lib/presets";
 import { BUILTIN_SKILLS, parseSkillFile } from "./lib/skills";
 import { IT_THEMES, IT_RATIOS, IT_FONT_SIZES, localSplitCards, normalizeCards, drawCardCanvas } from "./lib/cards";
-import { loadSettings, saveSettings } from "./lib/storage";
+import { loadSettings, saveSettings, loadArticles, saveArticles } from "./lib/storage";
 
 // 全局状态:草稿、API 配置、技能、图文卡片都放在这里,
 // 页面(路由)切换时组件卸载,但状态保留,回来草稿还在
@@ -34,6 +34,24 @@ export function AppProvider({ children }) {
 
   // ---- 写作技能 ----
   const [skills, setSkills] = useState(BUILTIN_SKILLS);
+
+  // ---- 文章库(已保存的文章,持久化) ----
+  const [articles, setArticles] = useState([]);
+  const [currentArticleId, setCurrentArticleId] = useState(null); // 当前编辑器里对应的文章,再次保存时覆盖而不是新建
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  // ---- AI 操作撤销栈(只记 AI 修改正文前的快照,手动输入靠浏览器原生撤销) ----
+  const [history, setHistory] = useState([]); // [{content, docTitle}],栈顶在末尾,上限 10
+
+  // ---- 流式输出:正文类生成边收边写(个别服务不支持时 callAIStream 自动退回一次性) ----
+  const [streamEnabled, setStreamEnabled] = useState(true);
+
+  // ---- 大纲先行:主题 → 大纲(可编辑)→ 按大纲成文 ----
+  const [outline, setOutline] = useState([]); // [{heading, note}]
+
+  // ---- 发布前检查 ----
+  const [checkReport, setCheckReport] = useState(null);   // {score, summary, issues:[{type,severity,excerpt,reason,suggestion,applied?,dismissed?,lost?}]}
+  const [checkedContent, setCheckedContent] = useState(""); // 检查时的正文快照,用于判断报告是否过期
 
   // ---- 图文生成模块 ----
   const [itSource, setItSource] = useState("");        // 图文源文本
@@ -78,6 +96,7 @@ export function AppProvider({ children }) {
             .filter(p => p && typeof p.name === "string" && p.name.trim() && typeof p.host === "string")
             .slice(0, 12));
         }
+        if (typeof s.streamEnabled === "boolean") setStreamEnabled(s.streamEnabled);
         if (MODELS.some(m => m.id === s.modelId)) setModelId(s.modelId);
         if (typeof s.customModel === "string") setCustomModel(s.customModel);
         if (typeof s.itSignature === "string") setItSignature(s.itSignature);
@@ -93,11 +112,29 @@ export function AppProvider({ children }) {
     if (!hydrated) return; // 水合完成前不回写,避免默认值覆盖已存设置
     clearTimeout(saveTimer.current);
     const snapshot = { apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
-      modelId, customModel, itSignature, itThemeId, itRatioId, itFontId };
+      modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId };
     saveTimer.current = setTimeout(() => saveSettings(snapshot), 300);
     return () => clearTimeout(saveTimer.current);
   }, [hydrated, apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
-    modelId, customModel, itSignature, itThemeId, itRatioId, itFontId]);
+    modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId]);
+
+  // ---- 文章库持久化:启动时水合,变更后防抖保存 ----
+  const [articlesReady, setArticlesReady] = useState(false);
+  const articlesTimer = useRef(null);
+
+  useEffect(() => {
+    loadArticles().then(list => {
+      if (Array.isArray(list)) setArticles(list.filter(a => a && typeof a.id === "string"));
+      setArticlesReady(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!articlesReady) return;
+    clearTimeout(articlesTimer.current);
+    articlesTimer.current = setTimeout(() => saveArticles(articles), 300);
+    return () => clearTimeout(articlesTimer.current);
+  }, [articlesReady, articles]);
 
   // ---- 派生值 ----
   const itTheme = IT_THEMES.find(t => t.id === itThemeId);
@@ -183,22 +220,165 @@ export function AppProvider({ children }) {
     setCustomApiModel(p.activeModel && models.includes(p.activeModel) ? p.activeModel : (models[0] || ""));
   };
 
+  // ---- 撤销:AI 修改正文前压栈,可一键回退 ----
+  const pushHistory = () => {
+    setHistory(prev => [...prev, { content, docTitle }].slice(-10));
+  };
+  const undoLast = () => {
+    const last = history[history.length - 1];
+    if (!last) return;
+    setContent(last.content);
+    setDocTitle(last.docTitle);
+    setHistory(prev => prev.slice(0, -1));
+  };
+
+  // ---- 文章库:保存 / 打开 / 删除 / 导出 .md ----
+  const saveArticle = () => {
+    if (!content.trim() && !docTitle.trim()) return;
+    const now = Date.now();
+    const base = { title: docTitle.trim(), content, topic, platformId: platform.id, toneId: tone.id, updatedAt: now };
+    if (currentArticleId && articles.some(a => a.id === currentArticleId)) {
+      setArticles(prev => prev.map(a => a.id === currentArticleId ? { ...a, ...base } : a));
+    } else {
+      const id = `a-${now}-${Math.random().toString(36).slice(2, 7)}`;
+      setArticles(prev => [{ id, createdAt: now, ...base }, ...prev]);
+      setCurrentArticleId(id);
+    }
+    setSavedFlash(true); setTimeout(() => setSavedFlash(false), 1600);
+  };
+
+  const openArticle = (id) => {
+    const a = articles.find(x => x.id === id);
+    if (!a) return;
+    setDocTitle(a.title || "");
+    setContent(a.content || "");
+    setTopic(a.topic || "");
+    const p = PLATFORMS.find(x => x.id === a.platformId); if (p) setPlatform(p);
+    const t = TONES.find(x => x.id === a.toneId); if (t) setTone(t);
+    setTitles([]); setError("");
+    setCurrentArticleId(id);
+  };
+
+  const deleteArticle = (id) => {
+    setArticles(prev => prev.filter(a => a.id !== id));
+    if (currentArticleId === id) setCurrentArticleId(null);
+  };
+
+  // 导出为 Markdown 文件(标题作一级标题;文件名取标题,过滤非法字符)
+  const exportMd = (a) => {
+    const title = (a.title || "").trim();
+    const body = a.content || "";
+    const md = title ? `# ${title}\n\n${body}` : body;
+    if (!md.trim()) return;
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const el = document.createElement("a");
+    el.href = url;
+    el.download = `${(title || "未命名文章").replace(/[\\/:*?"<>|]/g, "_").slice(0, 50)}.md`;
+    el.click();
+    setTimeout(() => URL.revokeObjectURL(url), 120);
+  };
+  const exportCurrentMd = () => exportMd({ title: docTitle, content });
+
+  // 正文类生成的统一入口:开启流式时边收边写进编辑器,否则一次性写入
+  // apply(文本) 由调用方决定怎么落到正文(整篇替换 / 拼回选区 / 追加到末尾)
+  const runProse = async (prompt, apply) => {
+    if (streamEnabled) {
+      const text = await callAIStream(prompt, baseHint(), apiConfig(), apply);
+      apply(text); // 收尾用 trim 过的最终结果覆盖一次
+      return text;
+    }
+    const text = await callAI(prompt, baseHint(), apiConfig());
+    apply(text);
+    return text;
+  };
+
   const generate = async () => {
     if (!topic.trim()) { setError("先写下你想聊的主题"); return; }
+    if (content.trim() || docTitle.trim()) pushHistory(); // 覆盖已有内容前留快照,可撤销
     setError(""); setLoading("gen"); setTitles([]); setDocTitle("");
+    setCurrentArticleId(null); // 新生成的是新文章,保存时不覆盖旧文
     try {
-      const text = await callAI(`请围绕这个主题创作一篇内容:「${topic.trim()}」`, baseHint(), apiConfig());
-      setContent(text);
+      await runProse(`请围绕这个主题创作一篇内容:「${topic.trim()}」`, setContent);
     } catch (e) { setError(e.message || "生成失败了,请再试一次"); }
     setLoading(null);
   };
 
-  const runAction = async (action) => {
-    if (!content.trim()) return;
-    setError(""); setLoading(action.id);
+  // ---- 大纲先行:先出结构再成文,长文更有逻辑推进 ----
+  const genOutline = async () => {
+    if (!topic.trim()) { setError("先写下你想聊的主题"); return; }
+    setError(""); setLoading("outline");
     try {
-      const text = await callAI(`${action.prompt}\n\n${content}`, baseHint(), apiConfig());
-      setContent(text);
+      const raw = await callAI(
+        `请为主题「${topic.trim()}」列一份适合${platform.name}的写作大纲,4-6个小节,循序渐进、有逻辑推进,不要写正文。` +
+        `只返回JSON数组,不要markdown代码块,格式:[{"heading":"小节标题,12字内","note":"这一节要写什么,25-40字"}]`,
+        baseHint(), apiConfig()
+      );
+      const arr = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      if (!Array.isArray(arr) || arr.length === 0) throw new Error("返回格式异常");
+      setOutline(arr.slice(0, 8).map(x => ({
+        heading: String(x.heading || "").slice(0, 40),
+        note: String(x.note || "").slice(0, 120),
+      })));
+    } catch (e) { setError(`大纲生成失败:${(e.message || "请重试").slice(0, 80)}`); }
+    setLoading(null);
+  };
+
+  const updateOutlineItem = (i, patch) => setOutline(prev => prev.map((s, idx) => idx === i ? { ...s, ...patch } : s));
+  const removeOutlineItem = (i) => setOutline(prev => prev.filter((_, idx) => idx !== i));
+  const addOutlineItem = () => setOutline(prev => [...prev, { heading: "", note: "" }]);
+  const moveOutlineItem = (i, dir) => setOutline(prev => {
+    const j = i + dir;
+    if (j < 0 || j >= prev.length) return prev;
+    const next = [...prev];
+    [next[i], next[j]] = [next[j], next[i]];
+    return next;
+  });
+  const clearOutline = () => setOutline([]);
+
+  const writeFromOutline = async () => {
+    const secs = outline.filter(s => s.heading.trim() || s.note.trim());
+    if (secs.length === 0) { setError("大纲是空的,先生成或手动添加小节"); return; }
+    if (content.trim() || docTitle.trim()) pushHistory();
+    setError(""); setLoading("gen"); setTitles([]);
+    setCurrentArticleId(null);
+    try {
+      const outlineText = secs.map((s, i) => `${i + 1}. ${s.heading}${s.note ? ` —— ${s.note}` : ""}`).join("\n");
+      const subject = topic.trim() || secs[0].heading;
+      await runProse(
+        `请围绕主题「${subject}」,严格按下面这份大纲写成一篇完整文章:每个小节都要充分展开,` +
+        `小节之间过渡自然,不要保留大纲的序号和破折号说明。\n\n${outlineText}`,
+        setContent
+      );
+    } catch (e) { setError(e.message || "生成失败了,请再试一次"); }
+    setLoading(null);
+  };
+
+  // sel = {start, end} | null:有有效选区时快捷操作只改写选中段,其余正文不动
+  const runAction = async (action, sel) => {
+    if (!content.trim()) return;
+    const selValid = action.mode !== "append" && sel &&
+      Number.isInteger(sel.start) && Number.isInteger(sel.end) &&
+      sel.start >= 0 && sel.start < sel.end && sel.end <= content.length;
+    setError(""); setLoading(action.id);
+    pushHistory(); // 流式会边写边改正文,快照必须先留;中途失败也能撤销回改前状态
+    try {
+      if (selValid) {
+        // 选区局部改写:带上下文提示衔接,结果只替换选中段
+        const before = content.slice(0, sel.start);
+        const selText = content.slice(sel.start, sel.end);
+        const after = content.slice(sel.end);
+        const prompt = `${action.prompt}\n\n${selText}\n\n` +
+          `(注意:这是文章中的一个片段,上文结尾是「…${before.slice(-120)}」,下文开头是「${after.slice(0, 120)}…」,` +
+          `改写结果必须与上下文自然衔接,只输出改写后的片段本身)`;
+        await runProse(prompt, t => setContent(before + t + after));
+      } else if (action.mode === "append") {
+        // 续写:结果追加到正文末尾
+        const base = content.trim();
+        await runProse(`${action.prompt}\n\n${content}`, t => setContent(`${base}\n\n${t}`));
+      } else {
+        await runProse(`${action.prompt}\n\n${content}`, setContent);
+      }
     } catch (e) { setError(e.message || "处理失败了,请再试一次"); }
     setLoading(null);
   };
@@ -224,6 +404,63 @@ export function AppProvider({ children }) {
       await navigator.clipboard.writeText(docTitle.trim() ? `${docTitle.trim()}\n\n${content}` : content);
       setCopied(true); setTimeout(() => setCopied(false), 1600);
     } catch { /* 剪贴板不可用时静默 */ }
+  };
+
+  // ---- 发布前检查:AI 按当前平台查违禁词风险/错别字/存疑表述,输出结构化报告 ----
+  const checkStale = !!checkReport && content !== checkedContent; // 正文改过,报告已过期
+
+  const runCheck = async () => {
+    if (!content.trim()) return;
+    setError(""); setLoading("check");
+    const snapshot = content;
+    try {
+      const raw = await callAI(
+        `请检查下面这篇准备发布到「${platform.name}」的内容,找出:\n` +
+        `1. 违禁词、广告法极限词、可能触发平台限流或审核风险的表述(type:"risk")\n` +
+        `2. 错别字、病句、标点误用(type:"typo")\n` +
+        `3. 表述不当或事实存疑、发布前需要核实的点(type:"fact")\n` +
+        `只返回JSON,不要markdown代码块,格式:\n` +
+        `{"score":0到100的发布安全分,"summary":"一句话总评","issues":[{"type":"risk|typo|fact","severity":"high|mid|low",` +
+        `"excerpt":"原文中的确切片段(必须与原文逐字一致,便于定位替换)","reason":"问题说明","suggestion":"可直接替换excerpt的修改文本,无法给出时留空"}]}\n` +
+        `没有问题就返回 {"score":95以上,"summary":"...","issues":[]}。\n\n${snapshot}`,
+        "你是资深新媒体内容安全与文字编辑专家,熟悉广告法与各平台社区规范,判断精准、不夸大风险。",
+        apiConfig()
+      );
+      const data = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      if (!data || !Array.isArray(data.issues)) throw new Error("返回格式异常");
+      setCheckReport({
+        score: Math.max(0, Math.min(100, Number(data.score) || 0)),
+        summary: String(data.summary || "").slice(0, 120),
+        issues: data.issues.slice(0, 20).map(i => ({
+          type: ["risk", "typo", "fact"].includes(i.type) ? i.type : "fact",
+          severity: ["high", "mid", "low"].includes(i.severity) ? i.severity : "mid",
+          excerpt: String(i.excerpt || ""),
+          reason: String(i.reason || ""),
+          suggestion: String(i.suggestion || ""),
+        })),
+      });
+      setCheckedContent(snapshot);
+    } catch (e) { setError(`检查失败:${(e.message || "请重试").slice(0, 80)}`); }
+    setLoading(null);
+  };
+
+  // 一键应用某条建议:在正文中替换首个匹配片段(可撤销);原文已被改动则标记定位失败
+  const applyIssue = (idx) => {
+    const issue = checkReport?.issues[idx];
+    if (!issue || !issue.suggestion) return;
+    if (!issue.excerpt || !content.includes(issue.excerpt)) {
+      setCheckReport(r => ({ ...r, issues: r.issues.map((x, i) => i === idx ? { ...x, lost: true } : x) }));
+      return;
+    }
+    pushHistory();
+    const next = content.replace(issue.excerpt, issue.suggestion);
+    setContent(next);
+    setCheckedContent(next); // 应用建议是报告自身的修复,不让报告因此过期
+    setCheckReport(r => ({ ...r, issues: r.issues.map((x, i) => i === idx ? { ...x, applied: true } : x) }));
+  };
+
+  const dismissIssue = (idx) => {
+    setCheckReport(r => ({ ...r, issues: r.issues.map((x, i) => i === idx ? { ...x, dismissed: true } : x) }));
   };
 
   // ---- 图文生成:动作 ----
@@ -380,6 +617,16 @@ export function AppProvider({ children }) {
     platform, setPlatform, tone, setTone, topic, setTopic, content, setContent,
     docTitle, setDocTitle, titles, setTitles, loading, error, copied,
     generate, runAction, genTitles, copyAll,
+    // 撤销 / 发布前检查
+    canUndo: history.length > 0, undoLast,
+    checkReport, checkStale, runCheck, applyIssue, dismissIssue,
+    // 流式输出 / 大纲先行
+    streamEnabled, setStreamEnabled,
+    outline, genOutline, writeFromOutline, clearOutline,
+    updateOutlineItem, removeOutlineItem, addOutlineItem, moveOutlineItem,
+    // 文章库
+    articles, currentArticleId, savedFlash,
+    saveArticle, openArticle, deleteArticle, exportMd, exportCurrentMd,
     // 模型 / API
     modelId, setModelId, customModel, setCustomModel,
     apiMode, setApiMode, apiFormat, setApiFormat, apiHost, setApiHost,

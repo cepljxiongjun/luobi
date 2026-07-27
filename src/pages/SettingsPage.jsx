@@ -29,6 +29,7 @@ export default function SettingsPage() {
     customModels, addCustomModel, removeCustomModel,
     savedProviders, saveProvider, removeProvider, applyProvider,
     modelId, setModelId, customModel, setCustomModel, modelSummary,
+    streamEnabled, setStreamEnabled,
   } = useApp();
   const [presetHint, setPresetHint] = useState("");   // 选中预设后的接入提示
   const [testing, setTesting] = useState(false);
@@ -258,6 +259,26 @@ export default function SettingsPage() {
             </div>
           </section>
         )}
+
+        {/* 生成体验 */}
+        <section>
+          <div className={sectionLabelCls + " mb-2.5"}>生成体验</div>
+          <div role="button" tabIndex={0}
+            onClick={() => setStreamEnabled(!streamEnabled)}
+            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setStreamEnabled(!streamEnabled); } }}
+            className={chipCls(streamEnabled) + " flex items-center gap-2.5 px-3 py-2.5"}>
+            <span className={"flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] text-[10px] text-white " +
+              (streamEnabled ? "border-[1.5px] border-indigo bg-indigo" : "border-[1.5px] border-ink-faint bg-transparent")}>
+              {streamEnabled ? "✓" : ""}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className={"text-[13px] font-semibold " + (streamEnabled ? "text-indigo" : "text-ink")}>流式输出</div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                写作时文字逐字落到编辑器,不用干等整篇生成完;服务不支持流式会自动退回一次性返回
+              </div>
+            </div>
+          </div>
+        </section>
 
         <div className="text-xs text-ink-faint">
           当前生效:{apiMode === "custom"

@@ -29,8 +29,24 @@ function llmProxy() {
             headers,
             body: body.length ? body : undefined,
           });
+          const ctype = upstream.headers.get("content-type") || "application/json";
           res.statusCode = upstream.status;
-          res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
+          res.setHeader("Content-Type", ctype);
+
+          // SSE 必须边收边转发,整体缓冲会让流式输出退化成一次性返回
+          if (ctype.includes("text/event-stream") && upstream.body) {
+            res.setHeader("Cache-Control", "no-cache");
+            res.setHeader("Connection", "keep-alive");
+            res.flushHeaders?.();
+            const reader = upstream.body.getReader();
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              res.write(Buffer.from(value));
+            }
+            res.end();
+            return;
+          }
           res.end(Buffer.from(await upstream.arrayBuffer()));
         } catch (e) {
           res.statusCode = 502;

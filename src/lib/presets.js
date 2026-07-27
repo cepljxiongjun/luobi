@@ -17,9 +17,11 @@ export const TONES = [
   { id: "story", name: "故事叙事", desc: "场景、细节、代入感" },
 ];
 
+// mode: "replace" 结果替换目标文本(全文或选中段);"append" 结果追加到正文末尾
 export const QUICK_ACTIONS = [
-  { id: "rewrite", name: "换种写法", prompt: "请把下面这篇内容换一种写法重写,保持主题和平台风格不变,但用不同的切入角度和表达方式:" },
-  { id: "expand", name: "扩写丰富", prompt: "请扩写下面这篇内容,补充更多细节、例子或论据,让它更充实(篇幅增加约50%):" },
-  { id: "shorten", name: "精简压缩", prompt: "请把下面这篇内容压缩到原来的60%左右,保留核心观点和最有力的表达,删掉冗余:" },
-  { id: "polish", name: "润色提升", prompt: "请润色下面这篇内容:优化用词、让句子更有节奏感、强化开头和结尾,不改变结构和观点:" },
+  { id: "rewrite", name: "换种写法", mode: "replace", prompt: "请把下面这篇内容换一种写法重写,保持主题和平台风格不变,但用不同的切入角度和表达方式:" },
+  { id: "expand", name: "扩写丰富", mode: "replace", prompt: "请扩写下面这篇内容,补充更多细节、例子或论据,让它更充实(篇幅增加约50%):" },
+  { id: "shorten", name: "精简压缩", mode: "replace", prompt: "请把下面这篇内容压缩到原来的60%左右,保留核心观点和最有力的表达,删掉冗余:" },
+  { id: "polish", name: "润色提升", mode: "replace", prompt: "请润色下面这篇内容:优化用词、让句子更有节奏感、强化开头和结尾,不改变结构和观点:" },
+  { id: "continue", name: "续写", mode: "append", prompt: "请顺着下面这篇内容的结尾,保持同样的语气、人称和风格自然续写一段(200-400字),只输出新增的部分,不要重复原文:" },
 ];

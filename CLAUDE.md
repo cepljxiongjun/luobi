@@ -17,11 +17,12 @@ src/
   store.jsx             # AppProvider(Context):全部共享状态与动作,路由切换不丢草稿
   ui.js                 # 通用类名组合(chipCls / btnCls / inputCls / sectionLabelCls)
   components/
-    Layout.jsx          # 应用外壳:左侧导航栏(笔/图/设) + 顶栏 + <Outlet/>
+    Layout.jsx          # 应用外壳:左侧导航栏(笔/图/稿/设) + 顶栏 + <Outlet/>
     Fold.jsx            # 折叠面板(收起时显示状态摘要)
   pages/
-    WritePage.jsx       # 写作页(平台/语气/技能 + 编辑器)
+    WritePage.jsx       # 写作页(平台/语气/技能 + 编辑器,保存/导出 .md)
     ImageTextPage.jsx   # 图文生成页(拆卡 + 卡片预览/导出)
+    ArticlesPage.jsx    # 文章库页(已保存文章:继续编辑/导出 .md/删除)
     SettingsPage.jsx    # 模型设置页(内置模型 / 自定义接入)
   lib/
     api.js              # MODELS / buildEndpoint / proxyFetch / callAI
@@ -36,7 +37,13 @@ src/
 
 ## 已完成的功能
 
-1. **写作页** `/write`:平台适配(公众号/小红书/知乎/微博)、语气风格、快捷操作(换写法/扩写/精简/润色)、标题系统(「起5个标题」候选 + 独立标题栏)、Skills 写作技能(导入 .md/.txt,兼容 SKILL.md frontmatter,启用后注入系统提示词)
+1. **写作页** `/write`:平台适配(公众号/小红书/知乎/微博)、语气风格、快捷操作(换写法/扩写/精简/润色/**续写**,QUICK_ACTIONS 带 `mode: replace|append`)、标题系统(「起5个标题」候选 + 独立标题栏)、Skills 写作技能(导入 .md/.txt,兼容 SKILL.md frontmatter,启用后注入系统提示词);操作条「保存」存入文章库(再次保存覆盖同一篇,`currentArticleId` 关联;新生成会重置关联)、「导出 .md」下载 Markdown(标题作 `#` 一级标题)
+   - **选中局部改写**(对标秘塔/Notion AI):正文 textarea 选中一段后,快捷操作只改写选中段(prompt 带上下文衔接要求,结果替换回原位);选区由 WritePage 点击时从 editorRef 读取传入 `runAction(action, sel)`,不进 store
+   - **AI 操作撤销**:每次 AI 修改正文前 `pushHistory()` 压栈(上限 10,含 docTitle),操作条「↩ 撤销」回退;手动输入不入栈
+   - **发布前检查**(对标零克查词,竞品单独收费的品类):AI 按当前平台查违禁词/极限词风险、错别字病句、存疑表述,返回 JSON(安全分/总评/issues),渲染成报告面板;每条可一键「应用」建议(替换首个匹配,可撤销)或「忽略」;正文再修改后报告标脏提示重查;检查不遮挡编辑器(loading === "check" 不出全屏遮罩)
+   - **大纲先行**(对标光速写作):模型行「先列大纲」→ AI 出 4-6 个小节(JSON),渲染成可编辑面板(改标题/改说明/上下调序/增删/清空)→「按大纲成文」按确认后的结构成文;大纲状态在 store 的 `outline`
+   - 调研留档:`docs/产品调研-2026-07.md`
+2. **文章库页** `/articles`:已保存文章按更新时间排列,卡片显示标题/预览/平台/语气/字数/时间;「继续编辑」载回写作页(平台语气一并恢复)、「导出 .md」、删除(两步确认,墨色按钮——印泥红不用于此);持久化经 storage.js(浏览器 `luobi-articles-v1`,桌面端 settings.json 的 `articles` 键),防抖 300ms 自动落盘
 2. **图文生成页** `/imagetext`(对标 MD2Card / ai-xiaohs / Canva 小红书模板调研结论):
    - **内容来源两种模式**:「已有文章」(手动粘贴或「带入写作草稿」)/「主题直出」(输入主题一键生成整组卡片,不需要现成文章;可选粘贴参考爆款笔记,AI 只仿其结构写法——对标 ai-xiaohs 灵感创作/爆款仿写)
    - 拆卡两条路:「AI 拆分成卡片」(callAI 输出 JSON,`normalizeCards` 校验,失败自动本地兜底)/「本地快速拆分」(`localSplitCards` 按段落句子切,不依赖模型);主题直出无兜底,失败直接报错
@@ -61,6 +68,14 @@ src/
 2. **浏览器 dev** → Vite 的 `/llm-proxy` 中间件转发(vite.config.js,目标地址放 `x-proxy-target` 头,只透传 content-type / x-api-key / authorization / anthropic-version)
 3. **浏览器生产构建** → 直连(需目标服务允许跨域)
 
+### 流式输出(SSE)
+
+- `prepareRequest(userPrompt, systemHint, api, stream)` 统一组装三种通道的请求;`callAI` 一次性、`callAIStream(..., onDelta)` 流式,两者共用 `readJsonResult` 的错误分类
+- 只有**正文类生成**走流式(generate / runAction 的改写续写 / 按大纲成文,经 store 的 `runProse` 分发);标题、发布前检查、图文拆卡等 JSON 结果仍用 `callAI`
+- 兼容性:响应 content-type 不是 `text/event-stream` → 自动退回一次性解析;运行环境不给 `body.getReader()`(个别 WebView)→ 整体 text 后按 SSE 解析。设置页可关闭流式
+- **Vite 代理必须逐块转发**(`res.write` 循环),用 `arrayBuffer()` 整体缓冲会让流式退化成一次性返回(踩过的坑)
+- SSE 分片:一条 `data:` 行可能被 TCP 切断,解析时把最后一段留在 buffer 里等下一片再拼
+
 ## 桌面端(Tauri 2)
 
 - `src-tauri/`:标准 Tauri 2 工程,标识 `com.luobi.app`,窗口 1240×860
@@ -79,7 +94,7 @@ src/
 
 - **内置通道模型无 Key 会 401/403**:内置模型列表只是免配置的 UI,实际调用 api.anthropic.com 仍需鉴权。本地/桌面端请用「自定义接入」填自己的服务
 - **设置已持久化**(`src/lib/storage.js` + store.jsx 水合/防抖保存):模型与 API 配置、图文外观偏好、署名。浏览器存 localStorage(`luobi-settings-v1`),桌面端由 tauri-plugin-store 存 `%APPDATA%/com.luobi.app/settings.json`(Rust 侧在 lib.rs 注册,权限 `store:default` 在 capabilities/default.json)
-- 草稿、标题、技能库、图文卡片仍只在内存,刷新即失(持久化下一步做)
+- 文章可手动「保存」进文章库(已持久化);未保存的草稿、标题候选、技能库、图文卡片仍只在内存,刷新即失
 - API Key 明文存本机(localStorage / settings.json);桌面端后续可迁系统钥匙串
 
 ## 设计规范(改 UI 时必须遵守)

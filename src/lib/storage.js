@@ -7,7 +7,7 @@ import { isTauri } from "./api";
 const LS_KEY = "luobi-settings-v1";
 const STORE_FILE = "settings.json";
 const STORE_KEY = "settings";
-
+   
 let tauriStorePromise = null;
 function getTauriStore() {
   if (!tauriStorePromise) {
@@ -41,4 +41,33 @@ export async function saveSettings(obj) {
     }
     localStorage.setItem(LS_KEY, JSON.stringify(obj));
   } catch { /* 存储不可用(隐私模式等)时静默,应用照常可用 */ }
+}
+
+// ============ 文章库持久化(与设置同一存储后端,独立键) ============
+const ARTICLES_LS_KEY = "luobi-articles-v1";
+const ARTICLES_KEY = "articles";
+
+export async function loadArticles() {
+  try {
+    if (isTauri) {
+      const store = await getTauriStore();
+      return (await store.get(ARTICLES_KEY)) ?? [];
+    }
+    const raw = localStorage.getItem(ARTICLES_LS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveArticles(list) {
+  try {
+    if (isTauri) {
+      const store = await getTauriStore();
+      await store.set(ARTICLES_KEY, list);
+      await store.save();
+      return;
+    }
+    localStorage.setItem(ARTICLES_LS_KEY, JSON.stringify(list));
+  } catch { /* 存储不可用时静默 */ }
 }
