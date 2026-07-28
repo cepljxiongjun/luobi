@@ -1,9 +1,13 @@
-import { useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useApp } from "../store";
 import { MODELS } from "../lib/api";
-import { PLATFORMS, TONES, QUICK_ACTIONS } from "../lib/presets";
+import { PLATFORMS, TONES, QUICK_ACTIONS, INLINE_ACTIONS, customAction } from "../lib/presets";
 import Fold from "../components/Fold";
+import SelectionToolbar from "../components/SelectionToolbar";
+import ContextMenu from "../components/ContextMenu";
+import AcceptBar from "../components/AcceptBar";
+import { measureRange } from "../lib/textareaRect";
 import { chipCls, btnCls, sectionLabelCls } from "../ui";
 
 export default function WritePage() {
@@ -21,21 +25,145 @@ export default function WritePage() {
     skills, skillSummary, importSkills, toggleSkill, removeSkill,
   } = useApp();
   const [modelMenuOpen, setModelMenuOpen] = useState(false); // 主题卡片里的模型下拉菜单
-  const [selCount, setSelCount] = useState(0); // 正文选中字数,仅用于操作条提示
+  const [sel, setSel] = useState(null);         // 正文选区 {start,end}|null
+  const [anchor, setAnchor] = useState(null);   // 浮条/接受条锚点(正文卡片相对坐标)
+  const [menu, setMenu] = useState(null);       // 右键菜单 {x,y}(视口坐标)|null
+  const [pending, setPending] = useState(null); // 正在被 AI 改写的选区 {start,end,baseLen}
+  const [accept, setAccept] = useState(null);   // 改写完成待确认的新范围 {start,end}
+  const [hl, setHl] = useState(null);           // 自绘选区高亮 {box, rects}(卡片相对)
+  const [focused, setFocused] = useState(false);
+  const [scrollTick, setScrollTick] = useState(0); // 正文滚动后强制重算坐标
   const editorRef = useRef(null);
+  const cardRef = useRef(null);
   const fileInputRef = useRef(null);
+  const kbRef = useRef(null);
   const busy = loading !== null;
+  const selCount = sel ? sel.end - sel.start : 0;
 
-  // 点击快捷操作时从 textarea 读权威选区(失焦后 selectionStart/End 仍保留)
+  // 从 textarea 读权威选区(失焦后 selectionStart/End 仍保留)
   const readSelection = () => {
     const el = editorRef.current;
     if (!el || el.selectionStart >= el.selectionEnd) return null;
     return { start: el.selectionStart, end: el.selectionEnd };
   };
-  const syncSelCount = () => {
-    const el = editorRef.current;
-    setSelCount(el ? el.selectionEnd - el.selectionStart : 0);
+
+  // onSelect 在拖动过程中会连发:只更新选区本身,不动锚点,浮条才不会跟着鼠标抖
+  const syncSel = () => setSel(readSelection());
+
+  // 一次测量,同时喂给浮条和高亮:把视口坐标换算成正文卡片(relative)内的坐标
+  const layout = (range) => {
+    const el = editorRef.current, card = cardRef.current;
+    if (!el || !card) return;
+    const m = measureRange(el, range.start, range.end);
+    if (!m) { setAnchor(null); setHl(null); return; }
+    // absolute 子元素以卡片的 padding box 为原点,而 getBoundingClientRect 给的是 border box,
+    // 不扣掉 clientLeft/Top(即边框宽度)整层会偏 1px——高亮贴不住字就是这么来的
+    const r = card.getBoundingClientRect();
+    const c = { left: r.left + card.clientLeft, top: r.top + card.clientTop };
+
+    // 浮条默认贴选区首行上方;顶部装不下就翻到末行下方;最后夹进可视区,保证永远点得到
+    const H = 38;
+    let y = m.first.top - H - 8;
+    if (y < m.viewTop) y = m.last.bottom + 8;
+    y = Math.max(m.viewTop + 4, Math.min(y, m.viewBottom - H - 4));
+    setAnchor({
+      x: (m.first.left + m.first.right) / 2 - c.left,
+      y: y - c.top,
+      endX: m.last.left - c.left,
+      endY: Math.min(m.last.bottom + 6, m.viewBottom - 34) - c.top,
+    });
+
+    // 高亮层本身就是 textarea 的可视框 + overflow-hidden,滚出去的部分自动被裁掉。
+    // 上下各撑 3px:rect 贴的是字形盒(15px 字在 loose 行高里只占一半),不撑开像条下划线
+    const PAD = 3;
+    setHl({
+      box: { x: m.viewLeft - c.left, y: m.viewTop - c.top, w: m.viewWidth, h: m.viewBottom - m.viewTop },
+      rects: m.rects.map(r => ({
+        x: r.left - m.viewLeft, y: r.top - m.viewTop - PAD, w: r.width, h: r.height + PAD * 2,
+      })),
+    });
   };
+
+  // 抬手/松键后才重算锚点,即浮条落位
+  const syncAnchor = () => {
+    const s = readSelection();
+    setSel(s);
+    if (!s) { setAnchor(null); setHl(null); return; }
+    layout(s);
+  };
+
+  // 需要自绘高亮的两种情形:AI 正在改这段;或有选区但编辑器失焦(此时浏览器不画原生选区,
+  // 用户点了菜单里的输入框会以为选区丢了)
+  const hlRange = pending
+    ? { start: pending.start, end: pending.end + (content.length - pending.baseLen) }
+    : (sel && !focused ? sel : null);
+
+  // 流式改写时 content 每帧都在变,用 rAF 把测量压到每帧最多一次
+  useLayoutEffect(() => {
+    if (!hlRange) { if (!anchor) setHl(null); return; }
+    const id = requestAnimationFrame(() => layout(hlRange));
+    return () => cancelAnimationFrame(id);
+  }, [content, pending, focused, sel, scrollTick]);
+
+  // 局部改写闭环:runAction 内部已 try/catch,await 它就等于"这次改写结束了",
+  // 返回值就是新片段本身——据它算新范围,不受 setContent 重渲染时机影响
+  const runLocal = async (action, range) => {
+    setMenu(null); setAccept(null);
+    const scoped = range && action.mode !== "append";
+    if (!scoped) { await runAction(action, null); return; }
+
+    setPending({ ...range, baseLen: content.length });
+    const text = await runAction(action, range);
+    setPending(null);
+    if (!text) return; // 请求失败或返回空,不该弹"保留/撤销"误导用户
+
+    const next = { start: range.start, end: range.start + text.length };
+    setAccept(next);
+    const el = editorRef.current; // 选区改落到新范围,方便"再改一次";不主动抢焦点
+    if (el && document.activeElement === el) el.setSelectionRange(next.start, next.end);
+    setSel(next);
+    requestAnimationFrame(() => layout(next));
+  };
+
+  // 撤销这次改写:栈顶就是本次的快照(busy 保证期间不会有别的 AI 操作插队)
+  const undoRewrite = () => {
+    const r = accept;
+    setAccept(null);
+    undoLast();
+    requestAnimationFrame(() => { // 正文回退后偏移重新有效,把选区还给用户,方便换个操作再试
+      const el = editorRef.current;
+      if (el && r) { el.focus(); el.setSelectionRange(r.start, r.end); syncAnchor(); }
+    });
+  };
+
+  // 快捷键:store 的函数每次 render 都是新引用,放进 deps 会每帧重绑监听,所以用 ref 镜像
+  kbRef.current = (e) => {
+    const mod = e.metaKey || e.ctrlKey;
+    const ae = document.activeElement;
+    const inField = ae && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT");
+
+    if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveArticle(); return; }
+
+    if (mod && e.key.toLowerCase() === "z" && !e.shiftKey) {
+      // Ctrl+Z 也是输入框的原生撤销。只在"刚做完 AI 改写、接受条还在"的时间窗内劫持
+      // ——这恰好就是用户此刻心里想撤的那件事;其余时刻一律放行,手打的字照样能原生撤销。
+      // 焦点不在输入框时没有原生行为可抢,兜底走 AI 撤销栈。
+      if (accept) { e.preventDefault(); undoRewrite(); return; }
+      if (!inField && canUndo) { e.preventDefault(); undoLast(); }
+      return;
+    }
+
+    if (e.key === "Escape") { // 优先级:菜单 > 浮条 > 接受条
+      if (menu) { setMenu(null); return; }
+      if (anchor) { setAnchor(null); return; }
+      if (accept) setAccept(null);
+    }
+  };
+  useEffect(() => {
+    const h = (e) => kbRef.current?.(e);
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
 
   return (
     <main className="mx-auto box-border grid w-full max-w-[1440px] min-h-0 flex-1 grid-cols-[320px_1fr] gap-8 px-7 pt-6 pb-7">
@@ -107,7 +235,9 @@ export default function WritePage() {
       </aside>
 
       {/* ===== 右栏:创作区(编辑卡片自动生长填满高度,超长时栏内滚动) ===== */}
-      <section className="flex min-h-0 flex-col gap-[18px] overflow-y-auto">
+      {/* 右键菜单是 fixed、不跟随栏内滚动,滚动时直接关掉,与系统右键菜单一致 */}
+      <section onScroll={() => { if (menu) setMenu(null); }}
+        className="flex min-h-0 flex-col gap-[18px] overflow-y-auto">
 
         {/* 主题输入 + 落笔按钮 */}
         <div className="flex items-stretch gap-3.5 rounded-[10px] border border-line bg-white p-[18px]">
@@ -204,15 +334,17 @@ export default function WritePage() {
 
         {/* 快捷操作条 */}
         <div className="flex flex-wrap items-center gap-2">
+          {/* 顶部这排恒等于"整篇":选区操作已有浮条和右键菜单两个可见入口,
+              同一个按钮不该再按有没有选区分裂成两种行为 */}
           {QUICK_ACTIONS.map(a => (
-            <button key={a.id} onClick={() => runAction(a, readSelection())} disabled={busy || !content}
-              title={a.mode === "append" ? "接着结尾续写一段" : (selCount > 0 ? `只${a.name.slice(0, 2)}选中的 ${selCount} 字` : undefined)}
+            <button key={a.id} onClick={() => runAction(a, null)} disabled={busy || !content}
+              title={a.mode === "append" ? "接着结尾续写一段" : "改写整篇正文"}
               className={btnCls + " rounded-full px-3.5 py-[7px] text-[13px]"}>
               {loading === a.id ? "处理中…" : a.name}
             </button>
           ))}
           {selCount > 0 && (
-            <span className="text-[11px] text-indigo">已选 {selCount} 字 · 操作只改选中段</span>
+            <span className="text-[11px] text-ink-faint">已选 {selCount} 字 · 用选区上的浮条只改这段</span>
           )}
           <div className="mx-1 h-[18px] w-px bg-line" />
           {canUndo && (
@@ -383,9 +515,20 @@ export default function WritePage() {
         )}
 
         {/* 正文编辑区 */}
-        <div className="relative flex min-h-[200px] flex-1 flex-col rounded-[10px] border border-line bg-white">
-          {/* 流式输出时不遮挡编辑器,让用户看到文字逐字落下 */}
-          {busy && loading !== "titles" && loading !== "check" && loading !== "outline" && !(streamEnabled && content) && (
+        <div ref={cardRef} className="relative flex min-h-[200px] flex-1 flex-col rounded-[10px] border border-line bg-white">
+          {/* 选区高亮:层本身 = textarea 可视框 + overflow-hidden,滚出可视区的色块自动被裁 */}
+          {hl && hlRange && (
+            <div aria-hidden style={{ left: hl.box.x, top: hl.box.y, width: hl.box.w, height: hl.box.h }}
+              className="pointer-events-none absolute z-0 overflow-hidden">
+              {hl.rects.map((r, i) => (
+                <span key={i} style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
+                  className={"absolute rounded-[2px] " + (pending ? "bg-indigo-bg" : "bg-indigo-bg/60")} />
+              ))}
+            </div>
+          )}
+          {/* 流式输出时不遮挡编辑器,让用户看到文字逐字落下;
+              局部改写(pending)也不遮挡,否则关掉流式时高亮和浮条全被灰罩糊住 */}
+          {busy && !pending && loading !== "titles" && loading !== "check" && loading !== "outline" && !(streamEnabled && content) && (
             <div className="absolute inset-0 z-[5] flex items-center justify-center rounded-[10px] bg-[rgba(250,249,245,.86)]">
               <div className="lb-loading font-serif text-lg tracking-[4px] text-ink-soft">
                 笔尖游走<span>。</span><span>。</span><span>。</span>
@@ -401,7 +544,8 @@ export default function WritePage() {
               </div>
             </div>
           ) : (
-            <div className="flex flex-1 flex-col">
+            /* z-[1]:定位元素默认画在静态元素之上,必须显式给层级,高亮色块才压得到文字底下 */
+            <div className="relative z-[1] flex flex-1 flex-col">
               {/* 文章标题:居中 + 加粗 + 宋体大字号,与正文视觉区分 */}
               <input value={docTitle} onChange={e => setDocTitle(e.target.value)}
                 placeholder="在此输入标题,或点「起5个标题」挑一个"
@@ -410,10 +554,51 @@ export default function WritePage() {
                   border-b-solid [border-bottom-width:1px]
                   placeholder:font-sans placeholder:text-sm placeholder:font-normal placeholder:tracking-normal placeholder:text-ink-faint" />
               <textarea ref={editorRef} value={content}
-                onChange={e => { setContent(e.target.value); syncSelCount(); }}
-                onSelect={syncSelCount}
+                onChange={e => { setContent(e.target.value); setAccept(null); syncSel(); }}
+                onSelect={syncSel}
+                onMouseDown={() => setAnchor(null)}
+                onMouseUp={syncAnchor}
+                onDoubleClick={syncAnchor}
+                onKeyUp={e => { if (e.shiftKey || e.key.startsWith("Arrow")) syncAnchor(); }}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                onScroll={() => setScrollTick(t => t + 1)}
+                onContextMenu={e => {
+                  if (e.shiftKey) return; // 逃生阀:Shift+右键 让给系统菜单(粘贴等)
+                  if (busy) return;       // AI 忙时不接管,避免误触第二次操作
+                  e.preventDefault();
+                  const s = readSelection();
+                  setSel(s);
+                  if (s) layout(s);
+                  setMenu({ x: e.clientX, y: e.clientY });
+                }}
                 className="box-border min-h-[120px] w-full flex-1 resize-none rounded-[10px] border-none bg-transparent px-8 pt-6 pb-7 font-sans text-[15px] leading-loose text-ink" />
             </div>
+          )}
+
+          {/* 改写中:选区旁的小胶囊,取代全屏遮罩(复用 index.css 已有的 .lb-loading) */}
+          {pending && anchor && (
+            <div style={{ left: anchor.x, top: anchor.y }}
+              className="absolute z-20 -translate-x-1/2 rounded-full border border-line bg-white px-3 py-1
+                         text-xs text-indigo shadow-[0_8px_24px_rgba(35,38,45,.12)]">
+              <span className="lb-loading">改写中<span>。</span><span>。</span><span>。</span></span>
+            </div>
+          )}
+
+          {anchor && sel && !busy && !menu && !accept && (
+            <SelectionToolbar x={anchor.x} y={anchor.y} boxWidth={cardRef.current?.clientWidth || 0}
+              actions={INLINE_ACTIONS} busy={busy}
+              onAction={a => runLocal(a, sel)}
+              onMore={() => {
+                const el = cardRef.current, r = el.getBoundingClientRect(); // 菜单是 fixed,换回视口坐标
+                setMenu({ x: r.left + el.clientLeft + anchor.x, y: r.top + el.clientTop + anchor.y + 30 });
+              }} />
+          )}
+
+          {accept && anchor && (
+            <AcceptBar x={anchor.endX} y={anchor.endY} boxWidth={cardRef.current?.clientWidth || 0}
+              count={accept.end - accept.start}
+              onKeep={() => setAccept(null)} onUndo={undoRewrite} />
           )}
         </div>
 
@@ -421,6 +606,19 @@ export default function WritePage() {
           AI 生成的内容仅供参考,发布前请核实事实并加入你自己的观点
         </div>
       </section>
+
+      {/* 右键菜单挂在滚动栏之外:fixed 弹层放进滚动/sticky 容器会被困住(踩过的坑) */}
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} selCount={selCount} canUndo={canUndo} busy={busy}
+          onAction={a => runLocal(a, sel)}
+          onCustom={t => runLocal(customAction(t), sel)}
+          onUndo={() => { setMenu(null); setAccept(null); undoLast(); }}
+          onCopySel={() => {
+            if (sel) navigator.clipboard?.writeText(content.slice(sel.start, sel.end)).catch(() => {});
+            setMenu(null);
+          }}
+          onClose={() => setMenu(null)} />
+      )}
     </main>
   );
 }
