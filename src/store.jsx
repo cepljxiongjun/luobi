@@ -355,13 +355,16 @@ export function AppProvider({ children }) {
   };
 
   // sel = {start, end} | null:有有效选区时快捷操作只改写选中段,其余正文不动
+  // 返回模型产出的文本(失败返回 null),调用方据此判断这次改动的范围——
+  // 不能改完再去读 content,setContent 的重渲染未必先于 await 的后续代码执行
   const runAction = async (action, sel) => {
-    if (!content.trim()) return;
+    if (!content.trim()) return null;
     const selValid = action.mode !== "append" && sel &&
       Number.isInteger(sel.start) && Number.isInteger(sel.end) &&
       sel.start >= 0 && sel.start < sel.end && sel.end <= content.length;
     setError(""); setLoading(action.id);
     pushHistory(); // 流式会边写边改正文,快照必须先留;中途失败也能撤销回改前状态
+    let out = null;
     try {
       if (selValid) {
         // 选区局部改写:带上下文提示衔接,结果只替换选中段
@@ -371,16 +374,17 @@ export function AppProvider({ children }) {
         const prompt = `${action.prompt}\n\n${selText}\n\n` +
           `(注意:这是文章中的一个片段,上文结尾是「…${before.slice(-120)}」,下文开头是「${after.slice(0, 120)}…」,` +
           `改写结果必须与上下文自然衔接,只输出改写后的片段本身)`;
-        await runProse(prompt, t => setContent(before + t + after));
+        out = await runProse(prompt, t => setContent(before + t + after));
       } else if (action.mode === "append") {
         // 续写:结果追加到正文末尾
         const base = content.trim();
-        await runProse(`${action.prompt}\n\n${content}`, t => setContent(`${base}\n\n${t}`));
+        out = await runProse(`${action.prompt}\n\n${content}`, t => setContent(`${base}\n\n${t}`));
       } else {
-        await runProse(`${action.prompt}\n\n${content}`, setContent);
+        out = await runProse(`${action.prompt}\n\n${content}`, setContent);
       }
     } catch (e) { setError(e.message || "处理失败了,请再试一次"); }
     setLoading(null);
+    return out;
   };
 
   const genTitles = async () => {

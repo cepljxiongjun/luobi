@@ -25,3 +25,16 @@ export const QUICK_ACTIONS = [
   { id: "polish", name: "润色提升", mode: "replace", prompt: "请润色下面这篇内容:优化用词、让句子更有节奏感、强化开头和结尾,不改变结构和观点:" },
   { id: "continue", name: "续写", mode: "append", prompt: "请顺着下面这篇内容的结尾,保持同样的语气、人称和风格自然续写一段(200-400字),只输出新增的部分,不要重复原文:" },
 ];
+
+// 选区浮条只放 4 个高频 replace 操作:"续写"作用于文末、与选区无关,留给菜单和顶部条
+export const INLINE_ACTIONS = QUICK_ACTIONS.filter(a => a.mode === "replace");
+
+// 「按我的要求改写」:store 的 runAction 只读 action 的 .id/.mode/.prompt,
+// 所以自造一个同形状对象就能跑,不必进 QUICK_ACTIONS,也不必动 store
+export const customAction = (instruction) => ({
+  id: "custom",
+  name: "按我的要求改写",
+  mode: "replace",
+  prompt: `请按下面这条要求改写这段内容:「${String(instruction).trim().slice(0, 200)}」。` +
+    `保持与上下文一致,只输出改写后的内容本身,不要解释、不要加引号。`,
+});

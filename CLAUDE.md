@@ -19,6 +19,9 @@ src/
   components/
     Layout.jsx          # 应用外壳:左侧导航栏(笔/图/稿/设) + 顶栏 + <Outlet/>
     Fold.jsx            # 折叠面板(收起时显示状态摘要)
+    SelectionToolbar.jsx# 选中正文后浮在选区上方的 AI 工具条
+    ContextMenu.jsx     # 正文右键菜单(全部操作 + 自定义指令 + 复制选中 + 撤销)
+    AcceptBar.jsx       # 局部改写完成后的「保留 / 撤销」条
   pages/
     WritePage.jsx       # 写作页(平台/语气/技能 + 编辑器,保存/导出 .md)
     ImageTextPage.jsx   # 图文生成页(拆卡 + 卡片预览/导出)
@@ -26,7 +29,8 @@ src/
     SettingsPage.jsx    # 模型设置页(内置模型 / 自定义接入)
   lib/
     api.js              # MODELS / buildEndpoint / proxyFetch / callAI
-    presets.js          # PLATFORMS / TONES / QUICK_ACTIONS
+    presets.js          # PLATFORMS / TONES / QUICK_ACTIONS / INLINE_ACTIONS / customAction
+    textareaRect.js     # 镜像 div 量 textarea 选区坐标(浮条定位 + 选区高亮的地基)
     skills.js           # 内置技能 + SKILL.md 解析
     cards.js            # 图文主题/画幅/拆卡算法/canvas 导出
     storage.js          # 设置持久化:浏览器 localStorage / 桌面端 tauri-plugin-store
@@ -38,8 +42,12 @@ src/
 ## 已完成的功能
 
 1. **写作页** `/write`:平台适配(公众号/小红书/知乎/微博)、语气风格、快捷操作(换写法/扩写/精简/润色/**续写**,QUICK_ACTIONS 带 `mode: replace|append`)、标题系统(「起5个标题」候选 + 独立标题栏)、Skills 写作技能(导入 .md/.txt,兼容 SKILL.md frontmatter,启用后注入系统提示词);操作条「保存」存入文章库(再次保存覆盖同一篇,`currentArticleId` 关联;新生成会重置关联)、「导出 .md」下载 Markdown(标题作 `#` 一级标题)
-   - **选中局部改写**(对标秘塔/Notion AI):正文 textarea 选中一段后,快捷操作只改写选中段(prompt 带上下文衔接要求,结果替换回原位);选区由 WritePage 点击时从 editorRef 读取传入 `runAction(action, sel)`,不进 store
+   - **选中局部改写**(对标秘塔/Notion AI):选中正文后**选区上方浮出工具条**(换写法/扩写/精简/润色 + `⋯` 唤起完整菜单),**正文右键**弹出完整菜单(5 个操作 + 「按我的要求改写…」自定义指令 + 复制选中 + 撤销;`Shift+右键` 让给系统菜单)。只改写选中段(prompt 带上下文衔接要求,结果替换回原位);选区状态在 WritePage(`sel`),不进 store,`runAction(action, sel)` 的 action 是鸭子类型,自定义指令用 `customAction(文本)` 现造
+     - 顶部快捷操作条恒等于「改写整篇」,不再按有没有选区分裂成两种行为
+     - **改写中的选区高亮 + 完成后「保留/撤销」**:AI 处理选中段时该段加靛蓝底色(自绘,受控 textarea 在改写期会丢原生选区),改完在末行下方弹接受条;`runAction` 返回模型产出的文本,据它算新范围——不能改完再读 `content`,setContent 的重渲染未必先于 await 之后的代码
+     - **坐标测量**:textarea 无原生 API,`lib/textareaRect.js` 用隐藏镜像 div 复刻排版量 `getClientRects()`。宽度必须用 `clientWidth`(offsetWidth 不扣滚动条)、镜像要带尾部文本 + 零宽空格、零高度空 rect 要过滤、换算到卡片坐标要扣 `clientLeft/Top`(absolute 以 padding box 为原点,否则整层偏 1px)——这几条错一条高亮就贴不住字
    - **AI 操作撤销**:每次 AI 修改正文前 `pushHistory()` 压栈(上限 10,含 docTitle),操作条「↩ 撤销」回退;手动输入不入栈
+   - **键盘快捷键**:`Ctrl/Cmd+S` 保存、`Esc` 逐层关闭(菜单 > 浮条 > 接受条)、`Ctrl/Cmd+Z` **只在接受条还在时**劫持为撤销 AI 改写,其余时刻放行给输入框原生撤销(否则手打的字就撤不了了)
    - **发布前检查**(对标零克查词,竞品单独收费的品类):AI 按当前平台查违禁词/极限词风险、错别字病句、存疑表述,返回 JSON(安全分/总评/issues),渲染成报告面板;每条可一键「应用」建议(替换首个匹配,可撤销)或「忽略」;正文再修改后报告标脏提示重查;检查不遮挡编辑器(loading === "check" 不出全屏遮罩)
    - **大纲先行**(对标光速写作):模型行「先列大纲」→ AI 出 4-6 个小节(JSON),渲染成可编辑面板(改标题/改说明/上下调序/增删/清空)→「按大纲成文」按确认后的结构成文;大纲状态在 store 的 `outline`
    - 调研留档:`docs/产品调研-2026-07.md`
@@ -88,7 +96,8 @@ src/
 - **锁定视口布局**:根容器(Layout)`h-screen overflow-hidden`,页面永远没有滚动条;左右两栏各自 `overflow-y-auto` 内部滚动兜底;正文编辑卡片 `flex-1` 自动撑满剩余高度
 - 全局 CSS 重置和 `@keyframes` 在 `src/index.css`(`html, body, #root` 清 margin、锁高度),index.html 无样式
 - 左栏低频设置用 `Fold` 折叠组件(收起时标题旁显示状态摘要)
-- **弹层(fixed 定位)不要放进 `position: sticky` 的容器**——sticky 会创建堆叠上下文,把弹层的 z-index 困住导致被后续内容遮挡(踩过的坑)
+- **弹层(fixed 定位)不要放进 `position: sticky` 的容器**——sticky 会创建堆叠上下文,把弹层的 z-index 困住导致被后续内容遮挡(踩过的坑);右键菜单同理挂在右栏 `<section>` 之外
+- 正文卡片内的层级:高亮层 `z-0` → 正文列 `relative z-[1]`(必须显式给,否则定位元素画在静态元素之上,色块盖住文字)→ loading 遮罩 `z-[5]` → 浮条/接受条 `z-20`;弹层里的按钮一律 `onMouseDown={e => e.preventDefault()}`,不抢 textarea 焦点才保得住选区
 
 ## 已知问题 / 本地运行注意
 
