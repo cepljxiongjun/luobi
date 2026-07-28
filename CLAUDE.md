@@ -31,6 +31,8 @@ src/
     api.js              # MODELS / buildEndpoint / proxyFetch / callAI
     presets.js          # PLATFORMS / TONES / QUICK_ACTIONS / INLINE_ACTIONS / customAction
     textareaRect.js     # 镜像 div 量 textarea 选区坐标(浮条定位 + 选区高亮的地基)
+    mdfile.js           # 文章 ↔ 单个 .md 的互转(frontmatter 序列化/容错解析/文件名规则)
+    articlesFs.js       # 文章库存储后端路由:自选文件夹(每篇一个 .md) / 应用内部存储
     skills.js           # 内置技能 + SKILL.md 解析
     cards.js            # 图文主题/画幅/拆卡算法/canvas 导出
     storage.js          # 设置持久化:浏览器 localStorage / 桌面端 tauri-plugin-store
@@ -51,7 +53,16 @@ src/
    - **发布前检查**(对标零克查词,竞品单独收费的品类):AI 按当前平台查违禁词/极限词风险、错别字病句、存疑表述,返回 JSON(安全分/总评/issues),渲染成报告面板;每条可一键「应用」建议(替换首个匹配,可撤销)或「忽略」;正文再修改后报告标脏提示重查;检查不遮挡编辑器(loading === "check" 不出全屏遮罩)
    - **大纲先行**(对标光速写作):模型行「先列大纲」→ AI 出 4-6 个小节(JSON),渲染成可编辑面板(改标题/改说明/上下调序/增删/清空)→「按大纲成文」按确认后的结构成文;大纲状态在 store 的 `outline`
    - 调研留档:`docs/产品调研-2026-07.md`
-2. **文章库页** `/articles`:已保存文章按更新时间排列,卡片显示标题/预览/平台/语气/字数/时间;「继续编辑」载回写作页(平台语气一并恢复)、「导出 .md」、删除(两步确认,墨色按钮——印泥红不用于此);持久化经 storage.js(浏览器 `luobi-articles-v1`,桌面端 settings.json 的 `articles` 键),防抖 300ms 自动落盘
+2. **文章库页** `/articles`:已保存文章按更新时间排列,卡片显示标题/预览/平台/语气/字数/时间;「继续编辑」载回写作页(平台语气一并恢复)、「导出 .md」、删除(两步确认,墨色按钮——印泥红不用于此);防抖 300ms 自动落盘。存储位置失效时页顶出降级横幅(带「重试」),配了自选文件夹时头部多一个「⟳ 重新扫描」
+
+   - **文章存储路径**(设置页「文章存储」区块,**仅桌面端**;浏览器拿不到本机路径,区块置灰走 localStorage):
+     - 选定文件夹后**文件夹就是存储后端**(不是镜像也不是导出),每篇文章一个 `.md`:YAML frontmatter 记 id/title/platform/tone/topic/时间,正文在下面,能被 Obsidian 直接打开、能丢进网盘同步。**正文不再加 `# 标题`**(标题已在 frontmatter,再写一遍会在往返时重复堆叠;`exportMd` 是分享产物,那边保留 H1)
+     - 文件名 `<清洗后标题>-<短id>.md`。短 id 拼进文件名是地基:重名天然不撞、从 id 能反推文件名(不需要索引文件)。改标题会 rename 旧文件,rename 失败(被 Obsidian 占用等)不报错、继续往旧文件名写——内容正确优先于文件名好看
+     - **增量写入**:`articlesFs.js` 模块内的 `synced` 表(id → {file, updatedAt})做 diff,只写变了的那几篇。依赖「任何改动都 bump updatedAt」,所以 `saveArticle` 的时间戳是**严格单调**的(`Math.max(Date.now(), prev+1)`),否则同一毫秒两次保存会被当成没变过而漏写
+     - **`synced` 必须放在模块里而不是让 store 传进来**:一次同步没跑完时下一次就可能被排上队,调用方手里的那份必然是旧的,两轮都会把同一篇当成「新建」,于是写出两个重复文件(踩过的坑,有回归用例)
+     - **降级不丢文章**:内存里的 articles 永远是工作副本,文件系统只是 sink。写失败/目录失效 → 不清路径(U 盘插回来能自愈)+ 全量写回内部存储兜底 + 报人话错误。迁移永不破坏性,旧的 `articles` 键一个字都不删
+     - 外部改动不做文件监听(要开 cargo feature 拖 notify,且外部改动与正在编辑的内容没有好的合并 UX),改为启动重扫 + 进文章库页重扫 + 手动「⟳ 重新扫描」;冲突时磁盘赢,但正在编辑的那篇不覆盖
+     - 没有 frontmatter 的普通 .md 也会被收编(标题取首个 H1 否则取文件名)——文件夹是事实来源,用户丢进去的东西就该出现在文库里
 2. **图文生成页** `/imagetext`(对标 MD2Card / ai-xiaohs / Canva 小红书模板调研结论):
    - **内容来源两种模式**:「已有文章」(手动粘贴或「带入写作草稿」)/「主题直出」(输入主题一键生成整组卡片,不需要现成文章;可选粘贴参考爆款笔记,AI 只仿其结构写法——对标 ai-xiaohs 灵感创作/爆款仿写)
    - 拆卡两条路:「AI 拆分成卡片」(callAI 输出 JSON,`normalizeCards` 校验,失败自动本地兜底)/「本地快速拆分」(`localSplitCards` 按段落句子切,不依赖模型);主题直出无兜底,失败直接报错
@@ -88,6 +99,10 @@ src/
 
 - `src-tauri/`:标准 Tauri 2 工程,标识 `com.luobi.app`,窗口 1240×860
 - HTTP 权限在 `src-tauri/capabilities/default.json`,已放开 http/https 全域
+- 插件:http / store / **fs / dialog / opener**(后三个为文章存储路径而加)
+- **fs 的运行时 scope 不持久化**(`tauri::fs::Scope` 内部是内存里的 `Mutex<HashSet<Pattern>>`,每次启动重建为空)。dialog 选目录时会自动 `allow_directory`,但只对那一次运行有效——所以 `lib.rs` 的 `.setup()` 里必须从 settings.json 读回 `articlesDir` 重新授权,否则重启后第一次 `readDir` 就 `PathForbidden`,整个文库读不出来。**授权只在 Rust 侧依据已存设置来做,不暴露成 JS 可调的命令**(那等于把任意目录提权的开关交给 WebView)
+- capabilities 里**不配任何 `fs:scope`**:只授命令,scope 全走运行时 = 唯一能读写的就是用户亲自选中的那个目录。不要用 `$HOME/**`(覆盖不到 D 盘/U 盘,又把家目录暴露给 WebView);也不要用 `fs:default`(它带的是 app 专属目录的 allow,与此无关),用 `fs:deny-default` 只取它的 deny
+- 「打开文件夹」用 `opener:allow-reveal-item-in-dir` 而非 `open-path`:后者走 ACL scope 且没有运行时 scope 可扩展,用户任选目录必被拦
 - 命令:`npm run tauri dev`(开发)、`npm run tauri build`(打安装包,产物在 `src-tauri/target/release/bundle/`)
 - 需要 Rust 工具链(rustup)
 

@@ -1,9 +1,10 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
-import { MODELS, callAI, callAIStream } from "./lib/api";
+import { MODELS, callAI, callAIStream, isTauri } from "./lib/api";
 import { PLATFORMS, TONES } from "./lib/presets";
 import { BUILTIN_SKILLS, parseSkillFile } from "./lib/skills";
 import { IT_THEMES, IT_RATIOS, IT_FONT_SIZES, localSplitCards, normalizeCards, drawCardCanvas } from "./lib/cards";
-import { loadSettings, saveSettings, loadArticles, saveArticles } from "./lib/storage";
+import { loadSettings, saveSettings, saveArticles } from "./lib/storage";
+import { readAll, syncAll, setSynced, firstSyncedFile, pickDir, revealDir, migrate } from "./lib/articlesFs";
 
 // 全局状态:草稿、API 配置、技能、图文卡片都放在这里,
 // 页面(路由)切换时组件卸载,但状态保留,回来草稿还在
@@ -39,6 +40,13 @@ export function AppProvider({ children }) {
   const [articles, setArticles] = useState([]);
   const [currentArticleId, setCurrentArticleId] = useState(null); // 当前编辑器里对应的文章,再次保存时覆盖而不是新建
   const [savedFlash, setSavedFlash] = useState(false);
+
+  // ---- 文章存储位置(桌面端可指向任意文件夹,每篇一个 .md;空 = 应用内部存储) ----
+  const [articlesDir, setArticlesDir] = useState("");
+  const [storageError, setStorageError] = useState(""); // 落盘失败/目录失效的人话提示
+  const [storageBusy, setStorageBusy] = useState(false); // 选目录/迁移/重扫进行中
+  const [migratePending, setMigratePending] = useState(null); // {dir, mine, existing} 等用户确认迁移
+  const [migrateNote, setMigrateNote] = useState("");   // 迁移结果提示
 
   // ---- AI 操作撤销栈(只记 AI 修改正文前的快照,手动输入靠浏览器原生撤销) ----
   const [history, setHistory] = useState([]); // [{content, docTitle}],栈顶在末尾,上限 10
@@ -78,8 +86,10 @@ export function AppProvider({ children }) {
   const [hydrated, setHydrated] = useState(false);
   const saveTimer = useRef(null);
 
+  // 水合:文章库的读取必须排在设置之后——得先知道 articlesDir 才知道去哪儿读。
+  // 所以两件事串在同一条 .then 链上,顺序显式,不依赖两个 effect 之间的微妙时序
   useEffect(() => {
-    loadSettings().then(s => {
+    loadSettings().then(async s => {
       if (s) {
         if (s.apiMode === "builtin" || s.apiMode === "custom") setApiMode(s.apiMode);
         if (s.apiFormat === "anthropic" || s.apiFormat === "openai") setApiFormat(s.apiFormat);
@@ -104,37 +114,135 @@ export function AppProvider({ children }) {
         if (IT_RATIOS.some(r => r.id === s.itRatioId)) setItRatioId(s.itRatioId);
         if (IT_FONT_SIZES.some(f => f.id === s.itFontId)) setItFontId(s.itFontId);
       }
+      // 存储路径只在桌面端生效,浏览器拿不到本机路径
+      const dir = (isTauri && typeof s?.articlesDir === "string") ? s.articlesDir : "";
+      setArticlesDir(dir);
       setHydrated(true);
+
+      const r = await readAll(dir);
+      setArticles(r.articles);
+      setSynced(r.map);
+      if (r.error) setStorageError(r.error);
+      setArticlesReady(true);
     });
   }, []);
 
   useEffect(() => {
     if (!hydrated) return; // 水合完成前不回写,避免默认值覆盖已存设置
     clearTimeout(saveTimer.current);
+    // articlesDir 必须落进 settings.json:Rust 侧启动时就是从这里读回路径,
+    // 重新给 fs 运行时 scope 授权的(运行时 scope 不持久化,见 src-tauri/src/lib.rs)
     const snapshot = { apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
-      modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId };
+      modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir };
     saveTimer.current = setTimeout(() => saveSettings(snapshot), 300);
     return () => clearTimeout(saveTimer.current);
   }, [hydrated, apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
-    modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId]);
+    modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir]);
 
-  // ---- 文章库持久化:启动时水合,变更后防抖保存 ----
+  // ---- 文章库持久化:变更后防抖增量同步(水合在上面那条设置链里) ----
   const [articlesReady, setArticlesReady] = useState(false);
   const articlesTimer = useRef(null);
 
   useEffect(() => {
-    loadArticles().then(list => {
-      if (Array.isArray(list)) setArticles(list.filter(a => a && typeof a.id === "string"));
-      setArticlesReady(true);
-    });
-  }, []);
-
-  useEffect(() => {
     if (!articlesReady) return;
     clearTimeout(articlesTimer.current);
-    articlesTimer.current = setTimeout(() => saveArticles(articles), 300);
+    articlesTimer.current = setTimeout(async () => {
+      // 增量:只写 updatedAt 变了的那几篇,不是每次全量重写整个文件夹
+      const r = await syncAll(articlesDir, articles);
+      setStorageError(r.error || "");
+    }, 300);
     return () => clearTimeout(articlesTimer.current);
-  }, [articlesReady, articles]);
+  }, [articlesReady, articles, articlesDir]);
+
+  // ---- 存储位置的动作 ----
+
+  // 选文件夹。dialog 选中时会自动给 fs 运行时 scope 授权,所以之后就能读写它了
+  const pickArticlesDir = async () => {
+    setMigrateNote(""); setStorageError("");
+    setStorageBusy(true);
+    try {
+      const dir = await pickDir();
+      if (!dir) return; // 用户取消
+      const r = await readAll(dir);
+      if (r.fatal) {
+        setStorageError(r.error);
+        return; // 这个目录根本读不了,不落配置,应用照常用内部存储
+      }
+      setSynced(r.map);
+      const mine = articles.filter(a => !r.map.has(a.id));
+      if (mine.length > 0) {
+        // 让用户决定要不要把现有文章复制过去,不擅自搬家
+        setMigratePending({ dir, mine, existing: r.articles.length, folderArticles: r.articles });
+      } else {
+        setArticlesDir(dir);
+        setArticles(r.articles);
+        setMigrateNote(r.articles.length ? `已接管文件夹里的 ${r.articles.length} 篇` : "文件夹已就绪");
+      }
+    } catch (e) {
+      setStorageError(`选择文件夹失败:${(e?.message || "").slice(0, 80)}`);
+    } finally {
+      setStorageBusy(false);
+    }
+  };
+
+  // 迁移确认。copy=false 表示只用文件夹里已有的,内存里的留在内部存储不动
+  const confirmMigrate = async (copy) => {
+    const p = migratePending;
+    if (!p) return;
+    setMigratePending(null); setStorageBusy(true);
+    try {
+      let note = "";
+      if (copy) {
+        const { ok, fail, reason } = await migrate(p.dir, p.mine);
+        note = fail
+          ? `已迁移 ${ok}/${ok + fail} 篇,${fail} 篇写入失败:${reason}`
+          : `已迁移 ${ok} 篇到新位置`;
+        // 迁移永不破坏性:内部存储里的旧数据一个字都不删,留着当安全网
+        setArticles([...p.folderArticles, ...p.mine]);
+      } else {
+        setArticles(p.folderArticles);
+        note = `已切换到文件夹里的 ${p.folderArticles.length} 篇`;
+      }
+      setArticlesDir(p.dir);
+      setMigrateNote(note);
+    } finally {
+      setStorageBusy(false);
+    }
+  };
+
+  // 恢复默认存储:先把当前文章写回内部存储,再清路径。磁盘上的 .md 一个都不删
+  const resetArticlesDir = async () => {
+    setStorageBusy(true);
+    try {
+      await saveArticles(articles);
+      setSynced(new Map());
+      setArticlesDir("");
+      setStorageError("");
+      setMigrateNote("已恢复为应用内部存储,文件夹里的 .md 文件保持原样");
+    } finally {
+      setStorageBusy(false);
+    }
+  };
+
+  const openArticlesDir = () => {
+    return revealDir(articlesDir, firstSyncedFile());
+  };
+
+  // 重新扫描:用户可能在 Obsidian/资源管理器里直接改了文件。
+  // 冲突策略——磁盘赢,但正在编辑器里打开的那篇不覆盖,免得冲掉没保存的改动
+  const rescanArticles = async () => {
+    if (!articlesDir) return;
+    setStorageBusy(true);
+    try {
+      const r = await readAll(articlesDir);
+      setSynced(r.map);
+      setStorageError(r.error || "");
+      const keep = articles.find(a => a.id === currentArticleId);
+      setArticles(keep && !r.articles.some(a => a.id === keep.id) ? [...r.articles, keep] : r.articles);
+    } finally {
+      setStorageBusy(false);
+    }
+  };
 
   // ---- 派生值 ----
   const itTheme = IT_THEMES.find(t => t.id === itThemeId);
@@ -235,7 +343,10 @@ export function AppProvider({ children }) {
   // ---- 文章库:保存 / 打开 / 删除 / 导出 .md ----
   const saveArticle = () => {
     if (!content.trim() && !docTitle.trim()) return;
-    const now = Date.now();
+    // 严格单调:同一毫秒内连按两次保存会让 updatedAt 相同,增量同步就会把第二次
+    // 当成"没变过"漏写。+1 保证时间戳一定往前走,diff 才可靠
+    const prevArt = articles.find(a => a.id === currentArticleId);
+    const now = Math.max(Date.now(), (prevArt?.updatedAt || 0) + 1);
     const base = { title: docTitle.trim(), content, topic, platformId: platform.id, toneId: tone.id, updatedAt: now };
     if (currentArticleId && articles.some(a => a.id === currentArticleId)) {
       setArticles(prev => prev.map(a => a.id === currentArticleId ? { ...a, ...base } : a));
@@ -631,6 +742,9 @@ export function AppProvider({ children }) {
     // 文章库
     articles, currentArticleId, savedFlash,
     saveArticle, openArticle, deleteArticle, exportMd, exportCurrentMd,
+    // 文章存储位置
+    articlesDir, storageError, storageBusy, migratePending, migrateNote,
+    pickArticlesDir, confirmMigrate, resetArticlesDir, openArticlesDir, rescanArticles,
     // 模型 / API
     modelId, setModelId, customModel, setCustomModel,
     apiMode, setApiMode, apiFormat, setApiFormat, apiHost, setApiHost,

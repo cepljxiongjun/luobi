@@ -13,7 +13,10 @@ const fmtTime = (ts) => {
 // 文章库:管理已保存的文章(继续编辑 / 导出 .md / 删除)
 export default function ArticlesPage() {
   const nav = useNavigate();
-  const { articles, currentArticleId, openArticle, deleteArticle, exportMd } = useApp();
+  const {
+    articles, currentArticleId, openArticle, deleteArticle, exportMd,
+    articlesDir, storageError, storageBusy, rescanArticles,
+  } = useApp();
   const [confirmId, setConfirmId] = useState(null); // 两步删除:先点删除,再点确认
 
   const list = [...articles].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -25,10 +28,32 @@ export default function ArticlesPage() {
         <span className="text-xs text-ink-faint">
           {list.length > 0 ? `${list.length} 篇` : ""}
         </span>
-        <button onClick={() => nav("/write")} className={btnCls + " ml-auto rounded-full px-3.5 py-[6px] text-[13px]"}>
+        {/* 存在自选文件夹时给个手动出口:用户可能刚在 Obsidian 里改过文件 */}
+        {articlesDir && (
+          <button onClick={rescanArticles} disabled={storageBusy}
+            title="重新读取存储文件夹,拾取在外部编辑器里做的改动"
+            className={btnCls + " ml-auto rounded-full px-3.5 py-[6px] text-[13px]"}>
+            {storageBusy ? "扫描中…" : "⟳ 重新扫描"}
+          </button>
+        )}
+        <button onClick={() => nav("/write")}
+          className={btnCls + (articlesDir ? " " : " ml-auto ") + "rounded-full px-3.5 py-[6px] text-[13px]"}>
           ✎ 去写作
         </button>
       </div>
+
+      {/* 降级横幅:存储位置出问题时必须显眼,但文章一篇都没丢,只是暂时存回了内部存储 */}
+      {storageError && (
+        <div className="mb-3 flex items-center gap-3 rounded-[10px] border border-line bg-white px-4 py-3">
+          <div className="flex-1 text-[13px] leading-relaxed text-seal">{storageError}</div>
+          {articlesDir && (
+            <button onClick={rescanArticles} disabled={storageBusy}
+              className={btnCls + " shrink-0 rounded-full px-3 py-1 text-xs"}>
+              重试
+            </button>
+          )}
+        </div>
+      )}
 
       {list.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-[10px] border border-line bg-white px-10 py-20 text-center">
