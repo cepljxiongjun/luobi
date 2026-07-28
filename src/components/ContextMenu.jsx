@@ -14,11 +14,12 @@ const itemCls =
  * 这与 runAction(action, null) 的既有语义天然一致,不需要任何特判。
  */
 export default function ContextMenu({
-  x, y, selCount, canUndo, busy, onAction, onCustom, onUndo, onCopySel, onClose,
+  x, y, selCount, canUndo, busy, skills = [], onAction, onCustom, onSkill, onUndo, onCopySel, onClose,
 }) {
   const ref = useRef(null);
   const [pos, setPos] = useState(null);
   const [customOpen, setCustomOpen] = useState(false);
+  const [skillOpen, setSkillOpen] = useState(false);
   const [text, setText] = useState("");
   const scoped = selCount > 0;
 
@@ -32,7 +33,7 @@ export default function ContextMenu({
       left: clampX(x, w, 8, window.innerWidth - 8),
       top: y + h > window.innerHeight - 8 ? Math.max(8, y - h) : y,
     });
-  }, [x, y, customOpen]);
+  }, [x, y, customOpen, skillOpen]);
 
   const submitCustom = () => {
     if (!text.trim()) return;
@@ -80,6 +81,23 @@ export default function ContextMenu({
               className="box-border w-full rounded-md border border-line bg-white px-2.5 py-[7px] text-xs text-ink
                          placeholder:text-ink-faint" />
           </div>
+        )}
+
+        {/* 点名调用:只用这一条技能改写,不叠加自动注入的那些(对应 Manual 档) */}
+        {skills.length > 0 && (
+          <>
+            <button role="menuitem" disabled={busy} onClick={() => setSkillOpen(o => !o)} className={itemCls}>
+              <span className="font-semibold text-indigo">⚡ 用技能改写…</span>
+              <span className="ml-auto text-[10px] text-ink-faint">{skills.length}</span>
+            </button>
+            {skillOpen && skills.map(s => (
+              <button key={s.id} role="menuitem" disabled={busy} onClick={() => onSkill(s)}
+                title={s.description || undefined}
+                className={itemCls + " pl-6 text-ink-soft"}>
+                <span className="min-w-0 truncate">{s.name}</span>
+              </button>
+            ))}
+          </>
         )}
 
         <div className="mx-1 my-1.5 h-px bg-line" />

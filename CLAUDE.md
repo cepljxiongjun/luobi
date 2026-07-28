@@ -12,12 +12,12 @@
 ```
 src/
   main.jsx              # 入口,挂 App + index.css
-  App.jsx               # HashRouter 路由表(/write /imagetext /settings)
+  App.jsx               # HashRouter 路由表(/write /imagetext /articles /skills /settings)
   index.css             # Tailwind v4 入口 + @theme 设计令牌 + 全局重置/动画
   store.jsx             # AppProvider(Context):全部共享状态与动作,路由切换不丢草稿
   ui.js                 # 通用类名组合(chipCls / btnCls / inputCls / sectionLabelCls)
   components/
-    Layout.jsx          # 应用外壳:左侧导航栏(笔/图/稿/设) + 顶栏 + <Outlet/>
+    Layout.jsx          # 应用外壳:左侧导航栏(笔/图/稿/技/设) + 顶栏 + <Outlet/>
     Fold.jsx            # 折叠面板(收起时显示状态摘要)
     SelectionToolbar.jsx# 选中正文后浮在选区上方的 AI 工具条
     ContextMenu.jsx     # 正文右键菜单(全部操作 + 自定义指令 + 复制选中 + 撤销)
@@ -26,14 +26,16 @@ src/
     WritePage.jsx       # 写作页(平台/语气/技能 + 编辑器,保存/导出 .md)
     ImageTextPage.jsx   # 图文生成页(拆卡 + 卡片预览/导出)
     ArticlesPage.jsx    # 文章库页(已保存文章:继续编辑/导出 .md/删除)
-    SettingsPage.jsx    # 模型设置页(内置模型 / 自定义接入)
+    SettingsPage.jsx    # 模型设置页(内置模型 / 自定义接入 / 文章存储)
+    SkillsPage.jsx      # 技能库页(编写/作用域勾选/导入导出)
   lib/
     api.js              # MODELS / buildEndpoint / proxyFetch / callAI
     presets.js          # PLATFORMS / TONES / QUICK_ACTIONS / INLINE_ACTIONS / customAction
     textareaRect.js     # 镜像 div 量 textarea 选区坐标(浮条定位 + 选区高亮的地基)
     mdfile.js           # 文章 ↔ 单个 .md 的互转(frontmatter 序列化/容错解析/文件名规则)
     articlesFs.js       # 文章库存储后端路由:自选文件夹(每篇一个 .md) / 应用内部存储
-    skills.js           # 内置技能 + SKILL.md 解析
+    skills.js           # 技能:frontmatter 解析/作用域筛选/注入预算/持久化合并(纯函数)
+    builtinSkills.js    # 内置技能库(6 类 15 条纯数据)
     cards.js            # 图文主题/画幅/拆卡算法/canvas 导出
     storage.js          # 设置持久化:浏览器 localStorage / 桌面端 tauri-plugin-store
 ```
@@ -43,11 +45,22 @@ src/
 
 ## 已完成的功能
 
-1. **写作页** `/write`:平台适配(公众号/小红书/知乎/微博)、语气风格、快捷操作(换写法/扩写/精简/润色/**续写**,QUICK_ACTIONS 带 `mode: replace|append`)、标题系统(「起5个标题」候选 + 独立标题栏)、Skills 写作技能(导入 .md/.txt,兼容 SKILL.md frontmatter,启用后注入系统提示词);操作条「保存」存入文章库(再次保存覆盖同一篇,`currentArticleId` 关联;新生成会重置关联)、「导出 .md」下载 Markdown(标题作 `#` 一级标题)
+1. **写作页** `/write`:平台适配(公众号/小红书/知乎/微博)、语气风格、快捷操作(换写法/扩写/精简/润色/**续写**,QUICK_ACTIONS 带 `mode: replace|append`)、标题系统(「起5个标题」候选 + 独立标题栏)、Skills 写作技能(见下);操作条「保存」存入文章库(再次保存覆盖同一篇,`currentArticleId` 关联;新生成会重置关联)、「导出 .md」下载 Markdown(标题作 `#` 一级标题)
    - **选中局部改写**(对标秘塔/Notion AI):选中正文后**选区上方浮出工具条**(换写法/扩写/精简/润色 + `⋯` 唤起完整菜单),**正文右键**弹出完整菜单(5 个操作 + 「按我的要求改写…」自定义指令 + 复制选中 + 撤销;`Shift+右键` 让给系统菜单)。只改写选中段(prompt 带上下文衔接要求,结果替换回原位);选区状态在 WritePage(`sel`),不进 store,`runAction(action, sel)` 的 action 是鸭子类型,自定义指令用 `customAction(文本)` 现造
      - 顶部快捷操作条恒等于「改写整篇」,不再按有没有选区分裂成两种行为
      - **改写中的选区高亮 + 完成后「保留/撤销」**:AI 处理选中段时该段加靛蓝底色(自绘,受控 textarea 在改写期会丢原生选区),改完在末行下方弹接受条;`runAction` 返回模型产出的文本,据它算新范围——不能改完再读 `content`,setContent 的重渲染未必先于 await 之后的代码
      - **坐标测量**:textarea 无原生 API,`lib/textareaRect.js` 用隐藏镜像 div 复刻排版量 `getClientRects()`。宽度必须用 `clientWidth`(offsetWidth 不扣滚动条)、镜像要带尾部文本 + 零宽空格、零高度空 rect 要过滤、换算到卡片坐标要扣 `clientLeft/Top`(absolute 以 padding box 为原点,否则整层偏 1px)——这几条错一条高亮就贴不住字
+   - **写作技能 Skills**(设计取自 Claude Agent Skills 与 Cursor Rules:**元数据驱动的条件激活**):
+     - **内置库 6 类 15 条**(`lib/builtinSkills.js`,纯数据),默认启用 7 条。写技能内容的五条硬标准写在该文件顶部注释里:可数的硬约束 / 字符串级禁令清单 / 正反例配对 / 给可选项而非唯一解 / 自检清单收尾。**技能里不写平台、语气、总字数**——那三样已由 `platform.prompt` 和 `tone` 注入,再写一遍就是两个指令打架。单条 300-900 字符(有回归用例卡这个区间)
+     - **作用域** frontmatter `platforms` + `actions`:按当前平台与当前操作静态筛选。**缺省 = 全适用,缺省本身就是 alwaysApply** —— 所以老的只有 `name:` 的技能文件行为与改造前逐字节一致,零迁移代码;也不必再引一个 `alwaysApply` 字段与既有的 `enabled` 开关打架(Cursor 需要它是因为它没有用户开关)
+     - **`check` 与 `manual` 是 opt-in-only**:必须显式写进 `actions` 才生效。检查是审稿不是写作,把「开头要有钩子」注进查违禁词的提示词只会冲淡本职
+     - **注入预算** `SKILL_BUDGET=6000` / `SKILL_MAX=8`:用户自带 Key,技能块每次请求都付钱且不能像 agent 那样按需加载。裁剪按 `priority ↓ → 作用域具体度 ↓ → 自建优先`,**整条要么全进要么全不进**(半条规范可能刚好砍掉反例,比不注入更有害)。被裁的在左栏卡片上标「超预算未注入」
+     - **注入口** `baseHint(op)` / `skillsFor(op, platformId)`:`runProse` 第三参传 op,`runAction` 传 `action.op || action.id`(QUICK_ACTIONS 的 id 恰好就是 op 名,所以它们一个字没改)。**图文页四处与 runCheck 是各自 `system + skillsFor(...)` 而非换成 `baseHint()`** ——后者会注入 `platform.prompt`(公众号 800-1200 字)与卡片 JSON 要求打架,也会丢掉「资深小红书图文笔记编辑」这类角色设定。图文页平台固定传 `"xhs"`(产物形态恒定是小红书卡片,与写作页选的平台无关)
+     - **frontmatter 解析必须同时认内联和块式数组**(`platforms: [gzh]` 与 `platforms:\n  - gzh`):Obsidian 的 properties 面板保存时会重写成块式,只认一种用户编辑一次作用域就丢
+     - **脏数据防线**:非法平台/操作 id 全被过滤光时**视为未声明**而不是"永不生效"——否则一个拼错的平台名会让技能静默消失,那是最难排查的 bug
+     - **简介在读取时派生**(`describe(s)`)而不是存下来:存下来的话用户改了正文简介还停在旧内容上
+     - **持久化走独立键**(`luobi-skills-v1` / store 的 `skills` 键,不进 settings 快照——settings 是防抖全量写,技能几十 KB 混进去等于每敲一个 Key 字符就重新序列化整包)。内置**只存偏差**:没碰过的自动拿新版、只开关过的保留开关拿新版、编辑过的保留用户版本并标「已修改」(可还原)、删过的立墓碑不复活(可恢复)
+     - **点名调用**(对应 Manual 档):右键菜单「⚡ 用技能改写…」,`skillAction(skill)` 的 op 是 `manual`,所以自动技能块为空——点名就只用这一条
    - **AI 操作撤销**:每次 AI 修改正文前 `pushHistory()` 压栈(上限 10,含 docTitle),操作条「↩ 撤销」回退;手动输入不入栈
    - **键盘快捷键**:`Ctrl/Cmd+S` 保存、`Esc` 逐层关闭(菜单 > 浮条 > 接受条)、`Ctrl/Cmd+Z` **只在接受条还在时**劫持为撤销 AI 改写,其余时刻放行给输入框原生撤销(否则手打的字就撤不了了)
    - **发布前检查**(对标零克查词,竞品单独收费的品类):AI 按当前平台查违禁词/极限词风险、错别字病句、存疑表述,返回 JSON(安全分/总评/issues),渲染成报告面板;每条可一键「应用」建议(替换首个匹配,可撤销)或「忽略」;正文再修改后报告标脏提示重查;检查不遮挡编辑器(loading === "check" 不出全屏遮罩)
@@ -118,7 +131,7 @@ src/
 
 - **内置通道模型无 Key 会 401/403**:内置模型列表只是免配置的 UI,实际调用 api.anthropic.com 仍需鉴权。本地/桌面端请用「自定义接入」填自己的服务
 - **设置已持久化**(`src/lib/storage.js` + store.jsx 水合/防抖保存):模型与 API 配置、图文外观偏好、署名。浏览器存 localStorage(`luobi-settings-v1`),桌面端由 tauri-plugin-store 存 `%APPDATA%/com.luobi.app/settings.json`(Rust 侧在 lib.rs 注册,权限 `store:default` 在 capabilities/default.json)
-- 文章可手动「保存」进文章库(已持久化);未保存的草稿、标题候选、技能库、图文卡片仍只在内存,刷新即失
+- 文章与技能库均已持久化;未保存的草稿、标题候选、图文卡片仍只在内存,刷新即失
 - API Key 明文存本机(localStorage / settings.json);桌面端后续可迁系统钥匙串
 
 ## 设计规范(改 UI 时必须遵守)
@@ -131,7 +144,7 @@ src/
 
 ## 建议的下一步(按优先级)
 
-1. 持久化收尾:技能库、草稿(设置已做完;复用 storage.js,Key 可进系统钥匙串)
+1. 持久化收尾:草稿(设置/文章/技能已做完;Key 可进系统钥匙串)
 2. 历史草稿列表 + 版本对比
 3. 流式输出(SSE):两种协议格式都支持 stream,提升生成体验
 4. 双模型对比生成(同一主题左右两栏出稿)

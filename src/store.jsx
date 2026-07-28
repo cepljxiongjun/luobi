@@ -1,9 +1,11 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { MODELS, callAI, callAIStream, isTauri } from "./lib/api";
 import { PLATFORMS, TONES } from "./lib/presets";
-import { BUILTIN_SKILLS, parseSkillFile } from "./lib/skills";
+import { parseSkillFile, selectSkills, renderSkillsBlock, skillAction,
+  unpackSkills, packSkills, hasDeletedBuiltins, normalizeSkill,
+  serializeSkill, SKILL_COUNT_MAX, BUILTIN_SKILLS } from "./lib/skills";
 import { IT_THEMES, IT_RATIOS, IT_FONT_SIZES, localSplitCards, normalizeCards, drawCardCanvas } from "./lib/cards";
-import { loadSettings, saveSettings, saveArticles } from "./lib/storage";
+import { loadSettings, saveSettings, saveArticles, loadSkills, saveSkills } from "./lib/storage";
 import { readAll, syncAll, setSynced, firstSyncedFile, pickDir, revealDir, migrate } from "./lib/articlesFs";
 
 // 全局状态:草稿、API 配置、技能、图文卡片都放在这里,
@@ -34,7 +36,10 @@ export function AppProvider({ children }) {
   const [savedProviders, setSavedProviders] = useState([]);   // 用户保存的常用服务 {id,name,format,host,key,models,activeModel}
 
   // ---- 写作技能 ----
-  const [skills, setSkills] = useState(BUILTIN_SKILLS);
+  // 初值先给内置(带默认启用),水合完成后再换成合并了用户偏差的版本
+  const [skills, setSkills] = useState(() => unpackSkills(null));
+  const [skillsReady, setSkillsReady] = useState(false);
+  const skillsTimer = useRef(null);
 
   // ---- 文章库(已保存的文章,持久化) ----
   const [articles, setArticles] = useState([]);
@@ -138,6 +143,21 @@ export function AppProvider({ children }) {
     return () => clearTimeout(saveTimer.current);
   }, [hydrated, apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
     modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir]);
+
+  // ---- 技能库持久化:独立键,与设置互不干扰 ----
+  useEffect(() => {
+    loadSkills().then(stored => {
+      setSkills(unpackSkills(stored)); // 内置只存偏差,这里与最新的 BUILTIN_SKILLS 合并
+      setSkillsReady(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!skillsReady) return; // 水合完成前不回写,避免默认值覆盖已存技能
+    clearTimeout(skillsTimer.current);
+    skillsTimer.current = setTimeout(() => saveSkills(packSkills(skills)), 300);
+    return () => clearTimeout(skillsTimer.current);
+  }, [skillsReady, skills]);
 
   // ---- 文章库持久化:变更后防抖增量同步(水合在上面那条设置链里) ----
   const [articlesReady, setArticlesReady] = useState(false);
@@ -263,16 +283,22 @@ export function AppProvider({ children }) {
   const modelSummary = apiMode === "custom"
     ? (customApiModel.trim() ? `自定义 · ${customApiModel.trim()}` : "自定义 · 未配置")
     : (modelId === "__custom__" ? activeModel : MODELS.find(m => m.id === modelId)?.name);
-  const skillSummary = enabledSkills.length > 0 ? `${enabledSkills.length} 项生效中` : "未启用";
 
-  const baseHint = () => {
-    let hint = `你是一位资深自媒体写作者。写作平台:${platform.prompt} 语气风格:${tone.name}(${tone.desc})。`;
-    if (enabledSkills.length > 0) {
-      hint += "\n\n以下是必须严格遵循的写作技能规范:\n" +
-        enabledSkills.map(s => `【技能:${s.name}】\n${s.content.slice(0, 4000)}`).join("\n\n");
-    }
-    return hint;
-  };
+  // 当前平台下「落笔成文」会实际注入哪些技能:左栏用它显示生效数与超预算提示。
+  // 用 draft 当代表性场景——不同操作注入的条数会变,摘要不可能逐个列
+  const skillPlan = selectSkills(skills, { op: "draft", platformId: platform.id });
+  const skillSummary = enabledSkills.length === 0 ? "未启用"
+    : `${skillPlan.used.length} 项生效` + (skillPlan.dropped.length ? ` · ${skillPlan.dropped.length} 项超预算` : "");
+
+  // 算出当前上下文该注入的技能文本。platformId 可覆盖:图文页的产物恒定是小红书卡片,
+  // 与写作页当前选的平台无关,所以那边固定传 "xhs"
+  const skillsFor = (op, platformId = platform.id) =>
+    renderSkillsBlock(selectSkills(skills, { op, platformId }).used);
+
+  // op 决定注入哪些技能(技能可声明只在起标题/只在改写时生效)
+  const baseHint = (op = "draft") =>
+    `你是一位资深自媒体写作者。写作平台:${platform.prompt} 语气风格:${tone.name}(${tone.desc})。`
+    + skillsFor(op);
 
   // ---- 写作:动作 ----
   const importSkills = (fileList) => {
@@ -282,7 +308,19 @@ export function AppProvider({ children }) {
       reader.onload = () => {
         const text = String(reader.result || "").trim();
         if (!text) { setError(`「${file.name}」是空文件,已跳过`); return; }
-        setSkills(prev => [...prev, parseSkillFile(file.name, text)]);
+        const parsed = parseSkillFile(file.name, text);
+        if (!parsed) { setError(`「${file.name}」没有正文内容,已跳过`); return; }
+        setSkills(prev => {
+          if (prev.filter(s => !s.builtin).length >= SKILL_COUNT_MAX) {
+            setError(`技能最多 ${SKILL_COUNT_MAX} 条,「${file.name}」未导入`);
+            return prev;
+          }
+          // 同名用户技能覆盖(沿用常用服务的同名覆盖范式);与内置同名则加后缀,不许顶掉内置
+          const clash = prev.find(s => s.name === parsed.name);
+          if (clash?.builtin) return [...prev, { ...parsed, name: `${parsed.name}(导入)`.slice(0, 30) }];
+          if (clash) return prev.map(s => s.id === clash.id ? { ...parsed, id: s.id } : s);
+          return [...prev, parsed];
+        });
       };
       reader.onerror = () => setError(`读取「${file.name}」失败,请重试`);
       reader.readAsText(file);
@@ -291,6 +329,54 @@ export function AppProvider({ children }) {
 
   const toggleSkill = (id) => setSkills(prev => prev.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
   const removeSkill = (id) => setSkills(prev => prev.filter(s => s.id !== id));
+
+  // 新建一条空技能,返回它的 id 供调用方选中
+  const addSkill = () => {
+    const id = `sk-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setSkills(prev => {
+      if (prev.filter(s => !s.builtin).length >= SKILL_COUNT_MAX) {
+        setError(`技能最多 ${SKILL_COUNT_MAX} 条,请先删掉一些`);
+        return prev;
+      }
+      return [...prev, normalizeSkill({
+        id, name: "新技能", content: "在这里写下写作规范。\n\n好的技能要有:可数的硬约束、具体的禁用词、正反例、自检清单。",
+        builtin: false, enabled: false,
+      })];
+    });
+    return id;
+  };
+
+  // 编辑技能。改内置技能会打 edited 标记,这样以后我升级内置内容时不会覆盖掉用户的版本
+  const updateSkill = (id, patch) => setSkills(prev => prev.map(s => {
+    if (s.id !== id) return s;
+    const next = normalizeSkill({ ...s, ...patch }) || s;
+    return s.builtin && ("content" in patch || "name" in patch) ? { ...next, edited: true } : next;
+  }));
+
+  // 内置技能还原为默认:清掉 edited 标记与自定义内容,重新取当前版本的内置定义
+  const resetBuiltinSkill = (id) => setSkills(prev => prev.map(s => {
+    if (s.id !== id || !s.builtin) return s;
+    const def = BUILTIN_SKILLS.find(b => b.id === id);
+    return def ? { ...normalizeSkill({ ...def, enabled: s.enabled }), edited: false } : s;
+  }));
+
+  // 恢复被删掉的内置技能(墓碑清理)
+  const restoreBuiltinSkills = () => setSkills(prev => {
+    const have = new Set(prev.map(s => s.id));
+    const back = BUILTIN_SKILLS.filter(b => !have.has(b.id))
+      .map(b => normalizeSkill({ ...b, enabled: b.defaultEnabled }));
+    return back.length ? [...prev, ...back] : prev;
+  });
+
+  const exportSkillMd = (s) => {
+    const blob = new Blob([serializeSkill(s)], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const el = document.createElement("a");
+    el.href = url;
+    el.download = `${(s.name || "技能").replace(/[\\/:*?"<>|]/g, "_").slice(0, 40)}.md`;
+    el.click();
+    setTimeout(() => URL.revokeObjectURL(url), 120);
+  };
 
   // ---- 自定义接入:模型列表管理 ----
   const addCustomModel = (name) => {
@@ -393,13 +479,13 @@ export function AppProvider({ children }) {
 
   // 正文类生成的统一入口:开启流式时边收边写进编辑器,否则一次性写入
   // apply(文本) 由调用方决定怎么落到正文(整篇替换 / 拼回选区 / 追加到末尾)
-  const runProse = async (prompt, apply) => {
+  const runProse = async (prompt, apply, op = "draft") => {
     if (streamEnabled) {
-      const text = await callAIStream(prompt, baseHint(), apiConfig(), apply);
+      const text = await callAIStream(prompt, baseHint(op), apiConfig(), apply);
       apply(text); // 收尾用 trim 过的最终结果覆盖一次
       return text;
     }
-    const text = await callAI(prompt, baseHint(), apiConfig());
+    const text = await callAI(prompt, baseHint(op), apiConfig());
     apply(text);
     return text;
   };
@@ -423,7 +509,7 @@ export function AppProvider({ children }) {
       const raw = await callAI(
         `请为主题「${topic.trim()}」列一份适合${platform.name}的写作大纲,4-6个小节,循序渐进、有逻辑推进,不要写正文。` +
         `只返回JSON数组,不要markdown代码块,格式:[{"heading":"小节标题,12字内","note":"这一节要写什么,25-40字"}]`,
-        baseHint(), apiConfig()
+        baseHint("outline"), apiConfig()
       );
       const arr = JSON.parse(raw.replace(/```json|```/g, "").trim());
       if (!Array.isArray(arr) || arr.length === 0) throw new Error("返回格式异常");
@@ -485,13 +571,13 @@ export function AppProvider({ children }) {
         const prompt = `${action.prompt}\n\n${selText}\n\n` +
           `(注意:这是文章中的一个片段,上文结尾是「…${before.slice(-120)}」,下文开头是「${after.slice(0, 120)}…」,` +
           `改写结果必须与上下文自然衔接,只输出改写后的片段本身)`;
-        out = await runProse(prompt, t => setContent(before + t + after));
+        out = await runProse(prompt, t => setContent(before + t + after), action.op || action.id);
       } else if (action.mode === "append") {
         // 续写:结果追加到正文末尾
         const base = content.trim();
-        out = await runProse(`${action.prompt}\n\n${content}`, t => setContent(`${base}\n\n${t}`));
+        out = await runProse(`${action.prompt}\n\n${content}`, t => setContent(`${base}\n\n${t}`), action.op || action.id);
       } else {
-        out = await runProse(`${action.prompt}\n\n${content}`, setContent);
+        out = await runProse(`${action.prompt}\n\n${content}`, setContent, action.op || action.id);
       }
     } catch (e) { setError(e.message || "处理失败了,请再试一次"); }
     setLoading(null);
@@ -505,7 +591,7 @@ export function AppProvider({ children }) {
       const src = content.trim() || `主题:${topic}`;
       const raw = await callAI(
         `请为下面的内容想5个适合${platform.name}的标题,要有点击欲但不做标题党。只返回JSON数组,格式:["标题1","标题2","标题3","标题4","标题5"],不要markdown代码块。\n\n${src}`,
-        baseHint(), apiConfig()
+        baseHint("title"), apiConfig()
       );
       const clean = raw.replace(/```json|```/g, "").trim();
       const arr = JSON.parse(clean);
@@ -538,7 +624,8 @@ export function AppProvider({ children }) {
         `{"score":0到100的发布安全分,"summary":"一句话总评","issues":[{"type":"risk|typo|fact","severity":"high|mid|low",` +
         `"excerpt":"原文中的确切片段(必须与原文逐字一致,便于定位替换)","reason":"问题说明","suggestion":"可直接替换excerpt的修改文本,无法给出时留空"}]}\n` +
         `没有问题就返回 {"score":95以上,"summary":"...","issues":[]}。\n\n${snapshot}`,
-        "你是资深新媒体内容安全与文字编辑专家,熟悉广告法与各平台社区规范,判断精准、不夸大风险。",
+        "你是资深新媒体内容安全与文字编辑专家,熟悉广告法与各平台社区规范,判断精准、不夸大风险。"
+        + skillsFor("check"),
         apiConfig()
       );
       const data = JSON.parse(raw.replace(/```json|```/g, "").trim());
@@ -599,7 +686,7 @@ export function AppProvider({ children }) {
         `请把下面的文章重组成适合小红书图文笔记的卡片结构。只返回JSON,不要markdown代码块,格式:\n` +
         `{"cover":{"title":"12-20字有点击欲的主标题","tag":"4-8字亮点标签"},"pages":[{"heading":"每页小标题,8字内","points":["每页2-4条要点,每条20-40字,口语化"]}]}\n` +
         `pages 共 3-6 页,要点要提炼观点而不是照抄原文。\n\n文章:\n${itSource.trim()}`,
-        "你是资深小红书图文笔记编辑,擅长把长文提炼成分页卡片。", apiConfig()
+        "你是资深小红书图文笔记编辑,擅长把长文提炼成分页卡片。" + skillsFor("cards", "xhs"), apiConfig()
       );
       const cards = normalizeCards(JSON.parse(raw.replace(/```json|```/g, "").trim()));
       if (!cards) throw new Error("bad shape");
@@ -626,7 +713,7 @@ export function AppProvider({ children }) {
         `只返回JSON,不要markdown代码块,格式:\n` +
         `{"cover":{"title":"12-20字有点击欲的主标题","tag":"4-8字亮点标签"},"pages":[{"heading":"每页小标题,8字内","points":["每页2-4条要点,每条20-40字"]}]}\n` +
         `pages 共 3-6 页。${ref}`,
-        "你是资深小红书图文笔记创作者,擅长把一个主题拆解成有传播力的分页卡片。", apiConfig()
+        "你是资深小红书图文笔记创作者,擅长把一个主题拆解成有传播力的分页卡片。" + skillsFor("cards", "xhs"), apiConfig()
       );
       const cards = normalizeCards(JSON.parse(raw.replace(/```json|```/g, "").trim()));
       if (!cards) throw new Error("返回格式异常");
@@ -647,7 +734,7 @@ export function AppProvider({ children }) {
       const raw = await callAI(
         `根据下面这组图文卡片的内容,给封面想5个更有点击欲的小红书标题(12-20字,可带1个emoji,不做标题党)。` +
         `只返回JSON数组:["标题1","标题2","标题3","标题4","标题5"],不要markdown代码块。\n\n${src}`,
-        "你是小红书爆款标题专家。", apiConfig()
+        "你是小红书爆款标题专家。" + skillsFor("title", "xhs"), apiConfig()
       );
       const arr = JSON.parse(raw.replace(/```json|```/g, "").trim());
       if (!Array.isArray(arr) || arr.length === 0) throw new Error("返回格式异常");
@@ -670,7 +757,7 @@ export function AppProvider({ children }) {
       const text = await callAI(
         `根据下面这组图文卡片,写一段发布时配的小红书正文文案:100-180字,口语化有网感,分2-3小段,` +
         `适度用emoji,结尾另起一行给4-6个话题标签(#开头,空格分隔)。直接输出文案本身。\n\n${src}`,
-        "你是小红书运营,擅长写高互动的笔记配文。", apiConfig()
+        "你是小红书运营,擅长写高互动的笔记配文。" + skillsFor("caption", "xhs"), apiConfig()
       );
       setItCaption(text);
     } catch (e) { setItError(`文案生成失败:${(e.message || "请重试").slice(0, 80)}`); }
@@ -753,7 +840,9 @@ export function AppProvider({ children }) {
     savedProviders, saveProvider, removeProvider, applyProvider,
     activeModel, modelSummary,
     // 技能
-    skills, enabledSkills, skillSummary, importSkills, toggleSkill, removeSkill,
+    skills, enabledSkills, skillSummary, skillPlan, importSkills, toggleSkill, removeSkill,
+    addSkill, updateSkill, resetBuiltinSkill, restoreBuiltinSkills, exportSkillMd,
+    hasDeletedBuiltins: hasDeletedBuiltins(skills), skillsFor, skillAction, selectSkills,
     // 图文
     itSource, setItSource, itSignature, setItSignature,
     itThemeId, setItThemeId, itRatioId, setItRatioId, itFontId, setItFontId,

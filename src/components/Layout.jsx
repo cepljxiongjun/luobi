@@ -6,6 +6,7 @@ const NAV_ITEMS = [
   { path: "/write", name: "写作", icon: "笔" },
   { path: "/imagetext", name: "图文", icon: "图" }, // 图文生成:长文拆卡片,导出发布图
   { path: "/articles", name: "文库", icon: "稿" }, // 文章库:已保存文章的管理
+  { path: "/skills", name: "技能", icon: "技" }, // 技能库:写作规范的编写与管理
 ];
 
 const navItemCls = ({ isActive }) =>
@@ -23,11 +24,12 @@ function NavItem({ path, name, icon, className = "" }) {
 
 // 应用外壳:左侧导航栏 + 顶栏,内容区由路由填充
 export default function Layout() {
-  const { content, articles } = useApp();
+  const { content, articles, skillSummary } = useApp();
   const { pathname } = useLocation();
   const wordCount = content.replace(/\s/g, "").length;
   const headerNote = pathname.startsWith("/imagetext") ? "图文生成"
     : pathname.startsWith("/articles") ? (articles.length > 0 ? `文章库 · ${articles.length} 篇` : "文章库")
+    : pathname.startsWith("/skills") ? `写作技能 · ${skillSummary}`
     : pathname.startsWith("/settings") ? "设置"
     : (wordCount > 0 ? `正文 ${wordCount} 字` : "今日,写点什么?");
 

@@ -60,6 +60,37 @@ export async function loadArticles() {
   }
 }
 
+// ============ 技能库持久化(独立键) ============
+// 为什么不并进 settings:settings 是 300ms 防抖**全量**写,技能几十 KB 混进去
+// 意味着每敲一个 API Key 字符都要重新序列化整包技能库
+const SKILLS_LS_KEY = "luobi-skills-v1";
+const SKILLS_KEY = "skills";
+
+export async function loadSkills() {
+  try {
+    if (isTauri) {
+      const store = await getTauriStore();
+      return (await store.get(SKILLS_KEY)) ?? null;
+    }
+    const raw = localStorage.getItem(SKILLS_LS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null; // 读不出来按首次启动处理,内置技能照常可用
+  }
+}
+
+export async function saveSkills(obj) {
+  try {
+    if (isTauri) {
+      const store = await getTauriStore();
+      await store.set(SKILLS_KEY, obj);
+      await store.save();
+      return;
+    }
+    localStorage.setItem(SKILLS_LS_KEY, JSON.stringify(obj));
+  } catch { /* 存储不可用时静默,技能在内存里照常生效 */ }
+}
+
 export async function saveArticles(list) {
   try {
     if (isTauri) {
