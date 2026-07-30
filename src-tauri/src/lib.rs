@@ -1,5 +1,41 @@
+use tauri::Manager;
 use tauri_plugin_fs::FsExt;
-use tauri_plugin_store::StoreBuilder;
+use tauri_plugin_sql::{Migration, MigrationKind};
+
+// 数据库文件名。tauri-plugin-sql 会把它解析到 app_config_dir 下
+// (见 plugins/sql/src/wrapper.rs 的 path_mapper),Windows 上即
+// %APPDATA%/com.luobi.app/luobi.db
+const DB_URL: &str = "sqlite:luobi.db";
+
+// 建表。settings 按行存(一个键一行)而不是整包 JSON —— 这样改一个字段
+// 只写一行,不必把整包设置重新序列化一遍。
+// skills 存的是"用户偏差":自建技能全量入库,内置技能只在被改过/关过/删过时留一行。
+fn migrations() -> Vec<Migration> {
+  vec![Migration {
+    version: 1,
+    description: "create settings and skills tables",
+    sql: "
+      CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS skills (
+        id          TEXT PRIMARY KEY,
+        builtin     INTEGER NOT NULL DEFAULT 0,
+        deleted     INTEGER NOT NULL DEFAULT 0,
+        enabled     INTEGER,
+        name        TEXT,
+        description TEXT,
+        content     TEXT,
+        platforms   TEXT,
+        actions     TEXT,
+        priority    INTEGER,
+        sort        INTEGER NOT NULL DEFAULT 0
+      );
+    ",
+    kind: MigrationKind::Up,
+  }]
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -9,6 +45,11 @@ pub fn run() {
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_opener::init())
+    .plugin(
+      tauri_plugin_sql::Builder::default()
+        .add_migrations(DB_URL, migrations())
+        .build(),
+    )
     .setup(|app| {
       restore_articles_dir_scope(app.handle());
 
@@ -32,25 +73,40 @@ pub fn run() {
 /// 但那次授权只对本次运行有效。重启后不补授,前端第一次 readDir 就会 PathForbidden,
 /// 整个文库读不出来。
 ///
+/// 设置搬进 SQLite 后,这里也必须跟着从 SQLite 读 —— 继续读 settings.json 会拿到
+/// 空值或旧值,症状就是"重启一次文章全没了"。
+///
 /// 授权只在 Rust 侧依据已持久化的设置来做,不暴露成 JS 可调的命令——那等于把
 /// "任意目录提权"的开关交给 WebView。
 fn restore_articles_dir_scope(app: &tauri::AppHandle) {
-  // disable_auto_save 要与前端 load(STORE_FILE, { autoSave: false }) 一致:
-  // 同路径的 store 会复用同一个实例,先建的那个的选项说了算
-  let store = match StoreBuilder::new(app, "settings.json").disable_auto_save().build() {
-    Ok(s) => s,
-    Err(_) => return, // 首次运行文件还不存在等情况,静默跳过
-  };
-  // 前端把所有设置放在 "settings" 这一个键下,不是平铺在顶层
-  let settings = match store.get("settings") {
-    Some(v) => v,
-    None => return,
-  };
-  let dir = match settings.get("articlesDir").and_then(|d| d.as_str()) {
-    Some(d) if !d.is_empty() => d.to_string(),
-    _ => return,
-  };
-  // recursive = false:只放行目录本身和它的直接子项,我们只在一层里写 .md。
-  // 与前端 open({ directory: true, recursive: false }) 授出的 glob 保持一致
-  let _ = app.fs_scope().allow_directory(&dir, false);
+  let Ok(dir) = app.path().app_config_dir() else { return };
+  let db_path = dir.join("luobi.db");
+  if !db_path.exists() {
+    return; // 首次运行,还没有库
+  }
+
+  // 用 SqliteConnectOptions 直接吃 PathBuf,不要拼 "sqlite:{path}" 这种 URL ——
+  // Windows 路径里的反斜杠和盘符冒号在 URL 解析里不可靠,而 Windows 正是主目标平台。
+  // read_only + 不 create:建库和迁移是 sql 插件的事,这里抢着建会跟它打架
+  let opts = sqlx::sqlite::SqliteConnectOptions::new()
+    .filename(&db_path)
+    .read_only(true)
+    .create_if_missing(false);
+  let found = tauri::async_runtime::block_on(async move {
+    let pool = sqlx::SqlitePool::connect_with(opts).await.ok()?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = 'articlesDir'")
+      .fetch_optional(&pool)
+      .await
+      .ok()
+      .flatten();
+    pool.close().await;
+    // 值是 JSON 编码的(与前端写入方式一致),所以要剥一层引号
+    row.and_then(|(v,)| serde_json::from_str::<String>(&v).ok())
+  });
+
+  if let Some(d) = found.filter(|d| !d.is_empty()) {
+    // recursive = false:只放行目录本身和它的直接子项,我们只在一层里写 .md。
+    // 与前端 open({ directory: true, recursive: false }) 授出的 glob 保持一致
+    let _ = app.fs_scope().allow_directory(&d, false);
+  }
 }

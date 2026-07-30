@@ -37,7 +37,8 @@ src/
     skills.js           # 技能:frontmatter 解析/作用域筛选/注入预算/持久化合并(纯函数)
     builtinSkills.js    # 内置技能库(6 类 15 条纯数据)
     cards.js            # 图文主题/画幅/拆卡算法/canvas 导出
-    storage.js          # 设置持久化:浏览器 localStorage / 桌面端 tauri-plugin-store
+    storage.js          # 持久化分发:桌面端 SQLite / 浏览器 localStorage;文章内部存储兜底
+    db.js               # SQLite 后端(仅桌面端):设置按行存 + 技能表 + 从旧 JSON 一次性迁移
 ```
 
 - **路由用 HashRouter**:Tauri 生产环境从本地文件加载 index.html,hash 路由不需要服务端 fallback,别改成 BrowserRouter
@@ -112,7 +113,7 @@ src/
 
 - `src-tauri/`:标准 Tauri 2 工程,标识 `com.luobi.app`,窗口 1240×860
 - HTTP 权限在 `src-tauri/capabilities/default.json`,已放开 http/https 全域
-- 插件:http / store / **fs / dialog / opener**(后三个为文章存储路径而加)
+- 插件:http / store / fs / dialog / opener / **sql(sqlite)**;另直接依赖 `sqlx`(版本与 features 跟 tauri-plugin-sql 对齐,cargo 会统一成一份)用于启动时读 `articlesDir`
 - **fs 的运行时 scope 不持久化**(`tauri::fs::Scope` 内部是内存里的 `Mutex<HashSet<Pattern>>`,每次启动重建为空)。dialog 选目录时会自动 `allow_directory`,但只对那一次运行有效——所以 `lib.rs` 的 `.setup()` 里必须从 settings.json 读回 `articlesDir` 重新授权,否则重启后第一次 `readDir` 就 `PathForbidden`,整个文库读不出来。**授权只在 Rust 侧依据已存设置来做,不暴露成 JS 可调的命令**(那等于把任意目录提权的开关交给 WebView)
 - capabilities 里**不配任何 `fs:scope`**:只授命令,scope 全走运行时 = 唯一能读写的就是用户亲自选中的那个目录。不要用 `$HOME/**`(覆盖不到 D 盘/U 盘,又把家目录暴露给 WebView);也不要用 `fs:default`(它带的是 app 专属目录的 allow,与此无关),用 `fs:deny-default` 只取它的 deny
 - 「打开文件夹」用 `opener:allow-reveal-item-in-dir` 而非 `open-path`:后者走 ACL scope 且没有运行时 scope 可扩展,用户任选目录必被拦
@@ -130,7 +131,12 @@ src/
 ## 已知问题 / 本地运行注意
 
 - **内置通道模型无 Key 会 401/403**:内置模型列表只是免配置的 UI,实际调用 api.anthropic.com 仍需鉴权。本地/桌面端请用「自定义接入」填自己的服务
-- **设置已持久化**(`src/lib/storage.js` + store.jsx 水合/防抖保存):模型与 API 配置、图文外观偏好、署名。浏览器存 localStorage(`luobi-settings-v1`),桌面端由 tauri-plugin-store 存 `%APPDATA%/com.luobi.app/settings.json`(Rust 侧在 lib.rs 注册,权限 `store:default` 在 capabilities/default.json)
+- **数据存储**(`src/lib/storage.js` 分发 + `src/lib/db.js` SQLite 后端):
+  - **设置与技能**:桌面端存 SQLite(`%APPDATA%/com.luobi.app/luobi.db`,表见 `src-tauri/src/lib.rs` 的 `migrations()`);浏览器存 localStorage(`luobi-settings-v1` / `luobi-skills-v1`)。**浏览器不上 SQLite**——拖 wasm 进来要几 MB,为几十 KB 数据不值,且与「文章存储路径仅桌面端」是同一范式
+  - **设置按行存**(一个键一行)而不是整包 JSON,这是换库唯一的实质收益:改一个字段只写一行,不必整包重新序列化
+  - **文章不进 SQLite**:事实来源是能被 Obsidian 打开的 `.md` 文件(自选文件夹)或 tauri-plugin-store 的内部存储兜底。塞进数据库等于把刚打开的盒子又焊死
+  - **⚠️ `articlesDir` 的读取方必须跟着搬**:`lib.rs` 启动时要读它给 fs 运行时 scope 补授权,设置搬进 SQLite 后那里也必须从 SQLite 读——继续读 `settings.json` 会拿到空值,症状是「重启一次文章全没了」。Rust 侧用 `SqliteConnectOptions::filename()` 直接吃 PathBuf,**不要拼 `sqlite:{path}` URL**(Windows 路径的反斜杠和盘符冒号在 URL 解析里不可靠)。值是 JSON 编码的,要 `serde_json::from_str::<String>` 剥一层
+  - **迁移永不破坏性**:首次进 SQLite 时从 `settings.json` 一次性搬入,旧 JSON 一个字都不删,留着当安全网;SQLite 探不通则整体退回旧后端。迁移记的是 promise 不是布尔——设置与技能两条水合链会并行触发,记布尔的话第二个调用方会读到空表
 - 文章与技能库均已持久化;未保存的草稿、标题候选、图文卡片仍只在内存,刷新即失
 - API Key 明文存本机(localStorage / settings.json);桌面端后续可迁系统钥匙串
 

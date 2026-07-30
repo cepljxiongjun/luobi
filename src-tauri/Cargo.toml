@@ -28,3 +28,7 @@ tauri-plugin-store = "2.4.3"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+# 直接依赖 sqlx 是为了在 setup() 里读回 articlesDir 给 fs scope 补授权(见 lib.rs)。
+# 版本与 features 跟 tauri-plugin-sql 对齐,cargo 会统一成同一份,不会编出两个 SQLite
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }

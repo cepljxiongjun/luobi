@@ -28,6 +28,9 @@
     "fs:allow-exists",
     "fs:allow-stat",
 
-    "opener:allow-reveal-item-in-dir"
+    "opener:allow-reveal-item-in-dir",
+
+    "sql:default",
+    "sql:allow-execute"
   ]
 }
