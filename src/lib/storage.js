@@ -1,16 +1,18 @@
 import { isTauri } from "./api";
 import {
-  dbAvailable, loadSettingsDb, saveSettingsDb, loadSkillsDb, saveSkillsDb, migrateFromStore,
+  dbAvailable, loadSettingsDb, saveSettingsDb, loadSkillsDb, saveSkillsDb,
+  loadArticlesDb, saveArticlesDb, migrateFromStore,
 } from "./db";
 
 // ============ 持久化:按运行环境选后端 ============
-// 设置与技能:
-//   - Tauri 桌面端 → SQLite(%APPDATA%/com.luobi.app/luobi.db),设置按行存
+//   - Tauri 桌面端 → SQLite(%APPDATA%/com.luobi.app/luobi.db)
 //   - 浏览器 → localStorage(拖 SQLite 的 wasm 进来要几 MB,为几十 KB 数据不值)
-// 文章:不走这里的 SQLite,见 articlesFs.js —— 事实来源是 .md 文件或下面的内部存储兜底
 //
-// tauri-plugin-store(settings.json)保留:一是文章的内部存储兜底还用它,
-// 二是它是 SQLite 的降级出口和迁移来源,里面的旧数据一个字都不删
+// 选了自选文件夹时,文章走 articlesFs.js 直接读写 .md,根本不到这里。
+//
+// tauri-plugin-store(settings.json)已退出写入路径,只剩两个职责:
+// SQLite 探不通时的降级出口、以及一次性迁移的来源。旧数据一个字都不删,留作安全网;
+// 等确认没有用户还停在旧版本,这个依赖就可以整个摘掉
 const LS_KEY = "luobi-settings-v1";
 const STORE_FILE = "settings.json";
 const STORE_KEY = "settings";
@@ -62,11 +64,14 @@ let migration = null;
 function migrateOnce() {
   if (!migration) {
     migration = (async () => {
-      const [oldSettings, oldSkills] = await Promise.all([
+      const [oldSettings, oldSkills, oldArticles] = await Promise.all([
         readLegacy(STORE_KEY, LS_KEY, null),
         readLegacy(SKILLS_KEY, SKILLS_LS_KEY, null),
+        readLegacy(ARTICLES_KEY, ARTICLES_LS_KEY, null),
       ]);
-      if (oldSettings || oldSkills) await migrateFromStore(oldSettings, oldSkills);
+      if (oldSettings || oldSkills || oldArticles) {
+        await migrateFromStore(oldSettings, oldSkills, oldArticles);
+      }
     })().catch(() => { /* 迁移失败不阻塞启动,读出来是空的,旧 JSON 还在 */ });
   }
   return migration;
@@ -114,15 +119,26 @@ export async function saveSkills(obj) {
   await writeLegacy(SKILLS_KEY, SKILLS_LS_KEY, obj);
 }
 
-// ---- 文章:内部存储兜底(自选了文件夹时走 articlesFs.js,不经过这里) ----
-// 刻意不进 SQLite:文章的事实来源应该是能被 Obsidian 打开的 .md 文件,
-// 塞进数据库等于把刚打开的盒子又焊死
+// ---- 文章:内部存储兜底(自选了文件夹时走 articlesFs.js,根本不经过这里) ----
+// 选了文件夹后文章就只是那一堆 .md,事实来源永远是能被 Obsidian 打开的文件。
+// 这里进 SQLite 只是为了让 tauri-plugin-store 退出写入路径,不是把文章"收进库"
 
 export async function loadArticles() {
+  try {
+    if (await dbAvailable()) {
+      const rows = await loadArticlesDb();
+      if (rows.length) return rows;
+      await migrateOnce();
+      return await loadArticlesDb();
+    }
+  } catch { /* 落到旧后端 */ }
   const list = await readLegacy(ARTICLES_KEY, ARTICLES_LS_KEY, []);
   return Array.isArray(list) ? list : [];
 }
 
 export async function saveArticles(list) {
+  try {
+    if (await dbAvailable()) { await saveArticlesDb(list); return; }
+  } catch { /* 落到旧后端 */ }
   await writeLegacy(ARTICLES_KEY, ARTICLES_LS_KEY, list);
 }

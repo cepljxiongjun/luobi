@@ -34,6 +34,30 @@ fn migrations() -> Vec<Migration> {
       );
     ",
     kind: MigrationKind::Up,
+  },
+  // 文章的"内部存储兜底"(没选自选文件夹时用)也搬进来,好把 tauri-plugin-store
+  // 从写入路径上彻底摘掉 —— 一个应用里活着两个存储引擎,是纯粹的理解成本。
+  // 注意:选了文件夹时文章仍然只是 .md 文件,这张表根本不会被写。
+  // 刻意不建 FTS5 索引:实测 800 篇 / 1MB 中文语料下,trigram 索引与普通全扫都是
+  // 1-2ms(5 字查询下 FTS5 反而更慢),而文章本来就全量在内存里,JS 过滤零 I/O
+  // 且浏览器端同样生效。等语料真的大到需要索引再加,迁移成本很低。
+  Migration {
+    version: 2,
+    description: "create articles table",
+    sql: "
+      CREATE TABLE IF NOT EXISTS articles (
+        id          TEXT PRIMARY KEY,
+        title       TEXT NOT NULL DEFAULT '',
+        content     TEXT NOT NULL DEFAULT '',
+        topic       TEXT NOT NULL DEFAULT '',
+        platform_id TEXT NOT NULL DEFAULT '',
+        tone_id     TEXT NOT NULL DEFAULT '',
+        created_at  INTEGER NOT NULL DEFAULT 0,
+        updated_at  INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_articles_updated ON articles(updated_at DESC);
+    ",
+    kind: MigrationKind::Up,
   }]
 }
 
