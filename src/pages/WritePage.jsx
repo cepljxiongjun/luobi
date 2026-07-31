@@ -5,6 +5,7 @@ import { MODELS } from "../lib/api";
 import { PLATFORMS, TONES, QUICK_ACTIONS, INLINE_ACTIONS, customAction } from "../lib/presets";
 import { scopeLabels, describe } from "../lib/skills";
 import Fold from "../components/Fold";
+import RefsPanel from "../components/RefsPanel";
 import SelectionToolbar from "../components/SelectionToolbar";
 import ContextMenu from "../components/ContextMenu";
 import AcceptBar from "../components/AcceptBar";
@@ -24,6 +25,7 @@ export default function WritePage() {
     modelId, setModelId, customModel, setCustomModel, apiMode, setApiMode, modelSummary,
     customModels, customApiModel, setCustomApiModel,
     skills, skillSummary, skillPlan, toggleSkill, skillAction,
+    webSummary, webOn, refsLoading, searchRefs,
   } = useApp();
   const [modelMenuOpen, setModelMenuOpen] = useState(false); // 主题卡片里的模型下拉菜单
   const [sel, setSel] = useState(null);         // 正文选区 {start,end}|null
@@ -198,6 +200,11 @@ export default function WritePage() {
           </div>
         </section>
 
+        {/* 联网资料:AI 查到了什么必须是可见、可否决的,否则用户没法判断稿子可不可信 */}
+        <Fold title="联网资料" summary={webSummary}>
+          <RefsPanel />
+        </Fold>
+
         {/* 这里只做快速开关;编写/查看全文去 /skills(左栏 320px 塞不下编辑器) */}
         <Fold title="写作技能" summary={skillSummary}>
           <div className="flex flex-col gap-2">
@@ -337,6 +344,15 @@ export default function WritePage() {
                 className={btnCls + " ml-2 rounded-full px-3 py-[5px] text-xs"}>
                 {loading === "outline" ? "构思大纲…" : "先列大纲"}
               </button>
+
+              {/* 联网查资料:开着联网时落笔会自动查一次,这个按钮是"先看看查到什么再动笔" */}
+              {webOn && (
+                <button onClick={() => searchRefs(topic.trim())} disabled={busy || !!refsLoading || !topic.trim()}
+                  title="按当前主题联网检索,结果在左栏「联网资料」里可逐条勾选"
+                  className={btnCls + " ml-2 rounded-full px-3 py-[5px] text-xs"}>
+                  {refsLoading === "search" ? "检索中…" : "⌕ 查资料"}
+                </button>
+              )}
             </div>
           </div>
 
@@ -345,7 +361,7 @@ export default function WritePage() {
             className="w-[76px] cursor-pointer rounded-lg border-none bg-seal font-serif text-lg font-bold tracking-[3px] text-white [writing-mode:vertical-rl] transition-all
               enabled:hover:bg-seal-dark enabled:active:scale-[.97] disabled:cursor-default disabled:opacity-50
               focus-visible:outline-2 focus-visible:outline-indigo focus-visible:outline-offset-2">
-            {loading === "gen" ? "落墨中" : "落 笔"}
+            {loading === "gen" ? (refsLoading === "search" ? "查资料" : "落墨中") : "落 笔"}
           </button>
         </div>
 
@@ -377,7 +393,9 @@ export default function WritePage() {
             {loading === "titles" ? "构思中…" : "起5个标题"}
           </button>
           <button onClick={runCheck} disabled={busy || !content}
-            title="AI 检查违禁词风险、错别字与存疑表述"
+            title={webOn
+              ? "AI 检查违禁词风险、错别字与存疑表述,并拿左栏的联网资料核对事实"
+              : "AI 检查违禁词风险、错别字与存疑表述"}
             className={btnCls + " rounded-full px-3.5 py-[7px] text-[13px]"}>
             {loading === "check" ? "检查中…" : "发布前检查"}
           </button>

@@ -22,6 +22,7 @@ src/
     SelectionToolbar.jsx# 选中正文后浮在选区上方的 AI 工具条
     ContextMenu.jsx     # 正文右键菜单(全部操作 + 自定义指令 + 复制选中 + 撤销)
     AcceptBar.jsx       # 局部改写完成后的「保留 / 撤销」条
+    RefsPanel.jsx       # 联网资料面板(检索/贴链接抓正文/逐条勾选/插入参考来源)
   pages/
     WritePage.jsx       # 写作页(平台/语气/技能 + 编辑器,保存/导出 .md)
     ImageTextPage.jsx   # 图文生成页(拆卡 + 卡片预览/导出)
@@ -30,6 +31,7 @@ src/
     SkillsPage.jsx      # 技能库页(编写/作用域勾选/导入导出)
   lib/
     api.js              # MODELS / buildEndpoint / proxyFetch / callAI
+    websearch.js        # 联网:4 家搜索源归一化 + Jina Reader 抓正文 + 资料注入预算
     presets.js          # PLATFORMS / TONES / QUICK_ACTIONS / INLINE_ACTIONS / customAction
     textareaRect.js     # 镜像 div 量 textarea 选区坐标(浮条定位 + 选区高亮的地基)
     mdfile.js           # 文章 ↔ 单个 .md 的互转(frontmatter 序列化/容错解析/文件名规则)
@@ -84,7 +86,24 @@ src/
    - 4 款模板主题(宣纸墨/靛蓝夜/暖米/青瓷)、画幅 3:4(小红书首选)与 1:1、字号三档、卡片署名
    - 预览:封面卡(大标题+亮点标签)+ 内容页卡(小标题+要点+页码);DOM 预览与 canvas 导出同构
    - 导出:`drawCardCanvas` 纯 canvas 绘制(无 html2canvas 依赖),单张/全部下载 1080×1440(或 1080×1080)PNG;复制全部文案
-3. **模型设置页** `/settings`:接入方式(内置/自定义)、内置模型单选、自定义接入表单(API 格式/Host/Key/模型名),修改即时生效并自动保存本机;写作页模型下拉保留快速切换,「自定义接入…」跳转设置页
+3. **联网**(`lib/websearch.js` + 设置页「联网搜索」区块 + 写作页左栏「联网资料」Fold):
+   - **不做「内置免配置搜索」**:搜索按次计费,内置等于我替用户付钱,也与模型层「用户自带 Key」的范式不一致。没配 Key 时联网整体不可用,而**不是偷偷降级成不联网**——那会让用户以为稿子里的数据是查过的
+   - **4 家搜索源,一张表搞定**:调研结论是面向 LLM 的搜索 API 已高度同构(POST JSON + 一个 Key 头 + 一个结果数组),所以只写「请求怎么拼 / 响应怎么读」的 builder 表 + 一层归一化,不做插件框架
+     - 博查 `api.bochaai.com/v1/web-search`(中文最好,响应沿用 Bing 结构 `data.webPages.value`;**HTTP 200 里用 body.code 表业务错误**,不看这层会把报错当成零结果)
+     - 智谱 `open.bigmodel.cn/api/paas/v4/web_search`(`search_engine: search_std`,已在用 GLM 的人不必再申请第二个 Key)
+     - Tavily `api.tavily.com/search`(英文强,每月 1000 次免费)/ Serper `google.serper.dev/search`(Google 结果,头名是 `X-API-KEY` 不是 Bearer)
+     - 归一化成 `{title, url, snippet, site, date}`,上层只认这个形状,换源不改任何调用点。时效档位直接借用博查/智谱的词表(两家逐字相同),Tavily(`time_range: day/week/…`)与 Serper(`tbs: qdr:*`)在各自 builder 里翻译;**不限时必须整个字段不出现**而不是传 null
+   - **网页正文抓取用 Jina Reader**(`r.jina.ai/<url>`,`Accept: application/json`):免 Key 可用(20 次/分钟),填 Key 到 200 次/分钟。不自己解析 HTML——正文抽取是专门问题,且浏览器端根本抓不到别人的页面(CORS),自己做等于只有桌面端能用
+   - **注入预算** `REF_BUDGET=8000` / `REF_MAX=8` / 单条正文 `REF_TEXT_MAX=4000`:与技能同一范式,**整条要么全进要么全不进**(半条资料会让模型拿着残缺的数字往下写,比不给更危险);单条自己就超预算时仍让它生效。被裁的在面板上标「超预算未注入」
+   - **写作与审稿是两套相反的规则**(`REF_RULES`):写作时资料是素材(别照搬、别硬用、资料里没有的别写成有出处),审稿时资料是标尺(逐条比对、冲突报成 `type:"fact"`、**不要因为资料里有新信息就建议往正文里加内容**)。`refsFor(op)` 按 op 选版本
+   - **只给「要产出新内容」的操作注入** `REF_OPS = draft/outline/expand/continue/custom/cards/caption/check`:换写法/精简/润色/起标题面对的是已经写好的正文,塞外部资料只会诱导模型加原文没有的东西
+   - **`refs` 的权威副本放在 `refsRef` 里**:自动检索完紧接着就要拼提示词,而 `setRefs` 触发的重渲染不保证发生在 `await` 之后那行代码之前(与局部改写「不能改完再读 `content`」同源)。所有改动走 `putRefs`,state 与镜像同时更新
+   - **资料必须可见、可否决**:面板逐条列出标题/摘要/站点/日期,可勾选、可删、可点开原文、可「抓正文」把摘要换成整篇。把这一层藏起来的联网功能,与让模型自由编造没有本质区别
+   - 检索**追加**而不是替换(一个选题常要换几个关键词各搜一次);已有资料时「落笔」不再自动检索(那是用户挑过的);**检索失败不阻断写作**,只留错误提示——联网是增强不是前置条件
+   - 「插入参考来源」把勾选的来源作为清单追加到正文末尾,**不自动加**:知乎需要、小红书绝不需要,这个判断只有用户能下
+   - `openExternal` 打开原文链接:桌面端 WebView 吞掉 `target="_blank"`,必须走 opener 插件。capabilities 加的是 `opener:allow-open-url` + `opener:allow-default-urls`(只放行 http/https/mailto/tel),**不含 `open-path`**,所以这条通道打不开本地文件
+   - Vite 代理的转发头白名单加了 `accept`(Jina 要它才返回结构化正文);Serper 的 `X-API-KEY` 与 Claude 格式头名恰好一致,不用另加
+4. **模型设置页** `/settings`:接入方式(内置/自定义)、内置模型单选、自定义接入表单(API 格式/Host/Key/模型名),修改即时生效并自动保存本机;写作页模型下拉保留快速切换,「自定义接入…」跳转设置页
    - Claude 格式 `/v1/messages`(x-api-key 头)/ OpenAI 兼容 `/v1/chat/completions`(Bearer 头),可接 One-API、DeepSeek、智谱、Ollama、vLLM 等
    - `buildEndpoint` 兼容各种 Host 写法:裸域名、带 `/v1`(DeepSeek)、带 `/api/paas/v4`(智谱)、完整端点,自动归一化,不会拼出 `/v1/v1/...`
    - **常用服务预设**(chips 一键填 Host+格式+提示):Ollama `localhost:11434` / vLLM `localhost:8000` / LM Studio `localhost:1234` / DeepSeek / 智谱 GLM
@@ -141,8 +160,9 @@ src/
   - **设置的按键写靠模块级 `lastWritten` 快照做 diff**:store 传下来的永远是整包快照,不比一下就不知道谁变了。**`loadSettingsDb` 读到空表时必须把 `lastWritten` 清成 null**——不清的话首次迁移会被 diff 判成「什么都没变」,一行都不写(踩过的坑,有回归用例)
   - **⚠️ `articlesDir` 的读取方必须跟着搬**:`lib.rs` 启动时要读它给 fs 运行时 scope 补授权,设置搬进 SQLite 后那里也必须从 SQLite 读——继续读 `settings.json` 会拿到空值,症状是「重启一次文章全没了」。Rust 侧用 `SqliteConnectOptions::filename()` 直接吃 PathBuf,**不要拼 `sqlite:{path}` URL**(Windows 路径的反斜杠和盘符冒号在 URL 解析里不可靠)。值是 JSON 编码的,要 `serde_json::from_str::<String>` 剥一层
   - **迁移永不破坏性**:首次进 SQLite 时从 `settings.json` 一次性搬入,旧 JSON 一个字都不删,留着当安全网;SQLite 探不通则整体退回旧后端。迁移记的是 promise 不是布尔——设置与技能两条水合链会并行触发,记布尔的话第二个调用方会读到空表
-- 文章与技能库均已持久化;未保存的草稿、标题候选、图文卡片仍只在内存,刷新即失
-- API Key 明文存本机(localStorage / settings.json);桌面端后续可迁系统钥匙串
+- 文章与技能库均已持久化;未保存的草稿、标题候选、图文卡片、**联网检索到的资料**仍只在内存,刷新即失
+- API Key 明文存本机(localStorage / SQLite);**搜索 Key 与 Jina Key 同样如此**;桌面端后续可迁系统钥匙串
+- **浏览器生产构建直连搜索服务需要对方允许跨域**(与模型调用同一处境):开发模式经 Vite 代理转发不受影响,桌面端走原生请求无此限制
 
 ## 设计规范(改 UI 时必须遵守)
 
@@ -154,11 +174,11 @@ src/
 
 ## 建议的下一步(按优先级)
 
-1. 持久化收尾:草稿(设置/文章/技能已做完;Key 可进系统钥匙串)
+1. 持久化收尾:草稿与检索到的资料(设置/文章/技能已做完;Key 可进系统钥匙串)
 2. 历史草稿列表 + 版本对比
-3. 流式输出(SSE):两种协议格式都支持 stream,提升生成体验
-4. 双模型对比生成(同一主题左右两栏出稿)
-5. 桌面端技能文件夹监听(放入即生效)
+3. 双模型对比生成(同一主题左右两栏出稿)
+4. 桌面端技能文件夹监听(放入即生效)
+5. 联网:多轮检索(模型读完第一批资料后自己提出下一个查询),以及热点选题榜
 
 ## Git 工作流
 

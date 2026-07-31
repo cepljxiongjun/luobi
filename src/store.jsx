@@ -5,6 +5,8 @@ import { parseSkillFile, selectSkills, renderSkillsBlock, skillAction,
   unpackSkills, packSkills, hasDeletedBuiltins, normalizeSkill,
   serializeSkill, SKILL_COUNT_MAX, BUILTIN_SKILLS } from "./lib/skills";
 import { IT_THEMES, IT_RATIOS, IT_FONT_SIZES, localSplitCards, normalizeCards, drawCardCanvas } from "./lib/cards";
+import { SEARCH_PROVIDERS, SEARCH_FRESHNESS, searchConfigured, webSearch, readUrl,
+  selectRefs, renderRefsBlock, renderSourceList, REF_TEXT_MAX } from "./lib/websearch";
 import { loadSettings, saveSettings, saveArticles, loadSkills, saveSkills } from "./lib/storage";
 import { readAll, syncAll, setSynced, firstSyncedFile, pickDir, revealDir, migrate } from "./lib/articlesFs";
 
@@ -34,6 +36,18 @@ export function AppProvider({ children }) {
   const [customApiModel, setCustomApiModel] = useState("");   // 自定义接入当前使用的模型
   const [customModels, setCustomModels] = useState([]);       // 自定义接入的模型列表(可配多个,快速切换)
   const [savedProviders, setSavedProviders] = useState([]);   // 用户保存的常用服务 {id,name,format,host,key,models,activeModel}
+
+  // ---- 联网:搜索源配置(用户自带 Key)+ 本次会话检索到的资料 ----
+  const [searchProvider, setSearchProvider] = useState("");   // "" = 未配置,联网整体不可用
+  const [searchKey, setSearchKey] = useState("");
+  const [searchCount, setSearchCount] = useState(5);
+  const [searchFreshness, setSearchFreshness] = useState("noLimit");
+  const [readerKey, setReaderKey] = useState("");             // Jina Reader Key(可留空,免 Key 有限额)
+  const [webEnabled, setWebEnabled] = useState(false);        // 总开关:关掉后既不自动检索也不注入
+  const [refs, setRefs] = useState([]);        // [{id,title,url,snippet,site,date,text,picked,from}]
+  const [refsLoading, setRefsLoading] = useState("");         // "" | "search" | "read" | ref.id
+  const [refsError, setRefsError] = useState("");
+  const [refsQuery, setRefsQuery] = useState("");             // 最近一次检索用的关键词,面板上显示
 
   // ---- 写作技能 ----
   // 初值先给内置(带默认启用),水合完成后再换成合并了用户偏差的版本
@@ -81,6 +95,7 @@ export function AppProvider({ children }) {
   const [itMode, setItMode] = useState("article");     // 'article' 已有文章拆卡 | 'topic' 主题直出
   const [itTopic, setItTopic] = useState("");          // 主题直出:主题输入
   const [itRefNote, setItRefNote] = useState("");      // 主题直出:参考爆款笔记(可选,仿其结构风格)
+  const [itRefLoading, setItRefLoading] = useState(false); // 参考笔记正从链接抓取中
   const [itTitles, setItTitles] = useState([]);        // 封面标题候选
   const [itTitlesLoading, setItTitlesLoading] = useState(false);
   const [itCaption, setItCaption] = useState("");      // 发布文案(caption + 话题标签)
@@ -112,6 +127,12 @@ export function AppProvider({ children }) {
             .slice(0, 12));
         }
         if (typeof s.streamEnabled === "boolean") setStreamEnabled(s.streamEnabled);
+        if (SEARCH_PROVIDERS.some(p => p.id === s.searchProvider)) setSearchProvider(s.searchProvider);
+        if (typeof s.searchKey === "string") setSearchKey(s.searchKey);
+        if (Number.isFinite(s.searchCount)) setSearchCount(Math.min(10, Math.max(1, Math.round(s.searchCount))));
+        if (SEARCH_FRESHNESS.some(f => f.id === s.searchFreshness)) setSearchFreshness(s.searchFreshness);
+        if (typeof s.readerKey === "string") setReaderKey(s.readerKey);
+        if (typeof s.webEnabled === "boolean") setWebEnabled(s.webEnabled);
         if (MODELS.some(m => m.id === s.modelId)) setModelId(s.modelId);
         if (typeof s.customModel === "string") setCustomModel(s.customModel);
         if (typeof s.itSignature === "string") setItSignature(s.itSignature);
@@ -138,11 +159,13 @@ export function AppProvider({ children }) {
     // articlesDir 必须落进 settings.json:Rust 侧启动时就是从这里读回路径,
     // 重新给 fs 运行时 scope 授权的(运行时 scope 不持久化,见 src-tauri/src/lib.rs)
     const snapshot = { apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
-      modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir };
+      modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir,
+      searchProvider, searchKey, searchCount, searchFreshness, readerKey, webEnabled };
     saveTimer.current = setTimeout(() => saveSettings(snapshot), 300);
     return () => clearTimeout(saveTimer.current);
   }, [hydrated, apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
-    modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir]);
+    modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir,
+    searchProvider, searchKey, searchCount, searchFreshness, readerKey, webEnabled]);
 
   // ---- 技能库持久化:独立键,与设置互不干扰 ----
   useEffect(() => {
@@ -295,10 +318,111 @@ export function AppProvider({ children }) {
   const skillsFor = (op, platformId = platform.id) =>
     renderSkillsBlock(selectSkills(skills, { op, platformId }).used);
 
-  // op 决定注入哪些技能(技能可声明只在起标题/只在改写时生效)
+  // ---- 联网:派生值与注入 ----
+  // refs 的权威副本另放一份在 ref 里:自动检索完紧接着就要拼提示词,而 setRefs 触发的
+  // 重渲染不保证发生在 await 之后那行代码之前(与局部改写"不能改完再读 content"同源)。
+  // 所有改动都走 putRefs,state 与镜像永远同时更新
+  const refsRef = useRef([]);
+  const putRefs = (next) => { refsRef.current = next; setRefs(next); };
+
+  const searchCfg = () => ({ provider: searchProvider, key: searchKey,
+    count: searchCount, freshness: searchFreshness, readerKey });
+  const webReady = searchConfigured(searchCfg());   // 选了源且填了 Key 才算能联网
+  const webOn = webEnabled && webReady;             // 总开关也打开了,这次才真的会联网
+  const refPlan = selectRefs(refs);
+  const pickedRefs = refs.filter(r => r.picked !== false);
+  const webSummary = !webReady ? "未配置"
+    : !webEnabled ? "已关闭"
+    : refs.length === 0 ? "已开启 · 落笔前自动查资料"
+    : `${refPlan.used.length} 条资料生效` + (refPlan.dropped.length ? ` · ${refPlan.dropped.length} 条超预算` : "");
+
+  // **只给"要产出新内容"的操作注入资料**。换写法/精简/润色/起标题面对的是已经写好的正文,
+  // 塞一堆外部资料进去只会诱导模型往里加原文没有的东西——那是改写,不是重写
+  const REF_OPS = ["draft", "outline", "expand", "continue", "custom", "cards", "caption", "check"];
+  // check 拿到的是"核对用"的规则版本,与写作那套刚好相反(见 websearch.js 的 REF_RULES)
+  const refsFor = (op) =>
+    (webOn && REF_OPS.includes(op) ? renderRefsBlock(refsRef.current, op === "check" ? "verify" : "write") : "");
+
+  // op 决定注入哪些技能(技能可声明只在起标题/只在改写时生效)与要不要带上联网资料
   const baseHint = (op = "draft") =>
     `你是一位资深自媒体写作者。写作平台:${platform.prompt} 语气风格:${tone.name}(${tone.desc})。`
-    + skillsFor(op);
+    + skillsFor(op) + refsFor(op);
+
+  // ---- 联网:动作 ----
+  const REF_LIST_MAX = 30; // 面板里最多留这么多条,再多用户自己也管不过来
+
+  // 检索并把结果**并进**资料列表而不是替换:一个选题常要换几个关键词各搜一次,
+  // 后一次把前一次冲掉的话,用户会在两批结果之间反复横跳
+  const searchRefs = async (query) => {
+    const q = String(query || "").trim();
+    if (!q) { setRefsError("先写下要查什么"); return 0; }
+    if (!webReady) { setRefsError("还没有配置联网搜索:请到设置页选择搜索源并填入 Key"); return 0; }
+    setRefsError(""); setRefsLoading("search");
+    try {
+      const list = await webSearch(q, searchCfg());
+      const stamped = list.map((r, i) => ({
+        ...r, id: `r-${Date.now()}-${i}`, text: "", picked: true, from: "search",
+      }));
+      const seen = new Set(refsRef.current.map(r => r.url));
+      putRefs([...refsRef.current, ...stamped.filter(r => !seen.has(r.url))].slice(0, REF_LIST_MAX));
+      setRefsQuery(q);
+      return list.length;
+    } catch (e) { setRefsError(e.message || "检索失败,请重试"); return 0; }
+    finally { setRefsLoading(""); }
+  };
+
+  // 直接贴链接:抓正文入库。用户手里往往已经有那篇要参考的报道/爆款笔记,
+  // 让他再去搜一遍关键词把它找出来是荒唐的
+  const addRefByUrl = async (u) => {
+    const link = String(u || "").trim();
+    if (!link) return false;
+    setRefsError(""); setRefsLoading("read");
+    try {
+      const page = await readUrl(link, searchCfg());
+      if (refsRef.current.some(r => r.url === page.url)) { setRefsError("这条链接已经在资料里了"); return false; }
+      putRefs([...refsRef.current, {
+        id: `r-${Date.now()}`, title: page.title, url: page.url, site: page.site, date: page.date,
+        snippet: page.text.slice(0, 300), text: page.text, picked: true, from: "url",
+      }].slice(0, REF_LIST_MAX));
+      return true;
+    } catch (e) { setRefsError(e.message || "抓取失败,请重试"); return false; }
+    finally { setRefsLoading(""); }
+  };
+
+  // 把某条搜索结果的摘要换成整篇正文。搜索返回的摘要只有一两句,
+  // 真要引用数据得看原文——但抓正文慢且吃额度,所以做成按条手动触发
+  const fetchRefText = async (id) => {
+    const r = refsRef.current.find(x => x.id === id);
+    if (!r || r.text) return;
+    setRefsError(""); setRefsLoading(id);
+    try {
+      const page = await readUrl(r.url, searchCfg());
+      putRefs(refsRef.current.map(x => x.id === id
+        ? { ...x, text: page.text.slice(0, REF_TEXT_MAX), title: x.title || page.title } : x));
+    } catch (e) { setRefsError(e.message || "抓取失败,请重试"); }
+    finally { setRefsLoading(""); }
+  };
+
+  const toggleRef = (id) => putRefs(refsRef.current.map(r => r.id === id ? { ...r, picked: r.picked === false } : r));
+  const removeRef = (id) => putRefs(refsRef.current.filter(r => r.id !== id));
+  const clearRefs = () => { putRefs([]); setRefsError(""); setRefsQuery(""); };
+
+  // 把勾选的来源作为清单追加到正文末尾。**不自动加**——知乎需要、小红书绝不需要,
+  // 这个判断只有用户能下
+  const insertSources = () => {
+    const list = renderSourceList(refsRef.current);
+    if (!list) return;
+    pushHistory();
+    setContent(content.trim() ? `${content.trim()}\n\n${list}` : list);
+  };
+
+  // 开着联网但一条资料都还没有时,动笔前先替用户查一次。
+  // 已经有资料就不再自动检索:那是用户手动搜过、挑过的,不该被覆盖。
+  // 检索失败**不阻断写作**,只留下错误提示——联网是增强,不是前置条件
+  const autoRefs = async (subject) => {
+    if (!webOn || refsRef.current.length > 0) return;
+    await searchRefs(subject);
+  };
 
   // ---- 写作:动作 ----
   const importSkills = (fileList) => {
@@ -496,6 +620,7 @@ export function AppProvider({ children }) {
     setError(""); setLoading("gen"); setTitles([]); setDocTitle("");
     setCurrentArticleId(null); // 新生成的是新文章,保存时不覆盖旧文
     try {
+      await autoRefs(topic.trim()); // 开了联网就先查资料,查不到也照常写
       await runProse(`请围绕这个主题创作一篇内容:「${topic.trim()}」`, setContent);
     } catch (e) { setError(e.message || "生成失败了,请再试一次"); }
     setLoading(null);
@@ -506,6 +631,7 @@ export function AppProvider({ children }) {
     if (!topic.trim()) { setError("先写下你想聊的主题"); return; }
     setError(""); setLoading("outline");
     try {
+      await autoRefs(topic.trim()); // 大纲最吃"这个领域现在在讨论什么",联网收益比成文还大
       const raw = await callAI(
         `请为主题「${topic.trim()}」列一份适合${platform.name}的写作大纲,4-6个小节,循序渐进、有逻辑推进,不要写正文。` +
         `只返回JSON数组,不要markdown代码块,格式:[{"heading":"小节标题,12字内","note":"这一节要写什么,25-40字"}]`,
@@ -625,7 +751,7 @@ export function AppProvider({ children }) {
         `"excerpt":"原文中的确切片段(必须与原文逐字一致,便于定位替换)","reason":"问题说明","suggestion":"可直接替换excerpt的修改文本,无法给出时留空"}]}\n` +
         `没有问题就返回 {"score":95以上,"summary":"...","issues":[]}。\n\n${snapshot}`,
         "你是资深新媒体内容安全与文字编辑专家,熟悉广告法与各平台社区规范,判断精准、不夸大风险。"
-        + skillsFor("check"),
+        + skillsFor("check") + refsFor("check"),
         apiConfig()
       );
       const data = JSON.parse(raw.replace(/```json|```/g, "").trim());
@@ -686,7 +812,7 @@ export function AppProvider({ children }) {
         `请把下面的文章重组成适合小红书图文笔记的卡片结构。只返回JSON,不要markdown代码块,格式:\n` +
         `{"cover":{"title":"12-20字有点击欲的主标题","tag":"4-8字亮点标签"},"pages":[{"heading":"每页小标题,8字内","points":["每页2-4条要点,每条20-40字,口语化"]}]}\n` +
         `pages 共 3-6 页,要点要提炼观点而不是照抄原文。\n\n文章:\n${itSource.trim()}`,
-        "你是资深小红书图文笔记编辑,擅长把长文提炼成分页卡片。" + skillsFor("cards", "xhs"), apiConfig()
+        "你是资深小红书图文笔记编辑,擅长把长文提炼成分页卡片。" + skillsFor("cards", "xhs") + refsFor("cards"), apiConfig()
       );
       const cards = normalizeCards(JSON.parse(raw.replace(/```json|```/g, "").trim()));
       if (!cards) throw new Error("bad shape");
@@ -705,6 +831,7 @@ export function AppProvider({ children }) {
     setItError(""); setItNote(""); setItTitles([]); setItCaption("");
     setItLoading(true);
     try {
+      await autoRefs(itTopic.trim());
       const ref = itRefNote.trim()
         ? `\n\n参考下面这篇爆款笔记的结构、节奏与表达风格(只学结构和写法,不要抄它的内容):\n${itRefNote.trim().slice(0, 2000)}`
         : "";
@@ -713,7 +840,7 @@ export function AppProvider({ children }) {
         `只返回JSON,不要markdown代码块,格式:\n` +
         `{"cover":{"title":"12-20字有点击欲的主标题","tag":"4-8字亮点标签"},"pages":[{"heading":"每页小标题,8字内","points":["每页2-4条要点,每条20-40字"]}]}\n` +
         `pages 共 3-6 页。${ref}`,
-        "你是资深小红书图文笔记创作者,擅长把一个主题拆解成有传播力的分页卡片。" + skillsFor("cards", "xhs"), apiConfig()
+        "你是资深小红书图文笔记创作者,擅长把一个主题拆解成有传播力的分页卡片。" + skillsFor("cards", "xhs") + refsFor("cards"), apiConfig()
       );
       const cards = normalizeCards(JSON.parse(raw.replace(/```json|```/g, "").trim()));
       if (!cards) throw new Error("返回格式异常");
@@ -723,6 +850,20 @@ export function AppProvider({ children }) {
       setItError(`生成失败:${(e.message || "请重试").slice(0, 80)}`);
     }
     setItLoading(false);
+  };
+
+  // 参考爆款笔记也可以只给一个链接:抓回正文填进输入框(用户还能再手改),
+  // 省掉"打开浏览器 → 全选 → 复制 → 回来粘贴"这四步
+  const itFetchRefNote = async (u) => {
+    const link = String(u || "").trim();
+    if (!link) return false;
+    setItError(""); setItRefLoading(true);
+    try {
+      const page = await readUrl(link, searchCfg());
+      setItRefNote(page.text.slice(0, 2000));
+      return true;
+    } catch (e) { setItError(`抓取失败:${(e.message || "请重试").slice(0, 80)}`); return false; }
+    finally { setItRefLoading(false); }
   };
 
   // 封面标题打磨:基于已生成的卡片出 5 个候选,点击替换
@@ -757,7 +898,7 @@ export function AppProvider({ children }) {
       const text = await callAI(
         `根据下面这组图文卡片,写一段发布时配的小红书正文文案:100-180字,口语化有网感,分2-3小段,` +
         `适度用emoji,结尾另起一行给4-6个话题标签(#开头,空格分隔)。直接输出文案本身。\n\n${src}`,
-        "你是小红书运营,擅长写高互动的笔记配文。" + skillsFor("caption", "xhs"), apiConfig()
+        "你是小红书运营,擅长写高互动的笔记配文。" + skillsFor("caption", "xhs") + refsFor("caption"), apiConfig()
       );
       setItCaption(text);
     } catch (e) { setItError(`文案生成失败:${(e.message || "请重试").slice(0, 80)}`); }
@@ -822,6 +963,13 @@ export function AppProvider({ children }) {
     // 撤销 / 发布前检查
     canUndo: history.length > 0, undoLast,
     checkReport, checkStale, runCheck, applyIssue, dismissIssue,
+    // 联网:配置 / 资料
+    searchProvider, setSearchProvider, searchKey, setSearchKey,
+    searchCount, setSearchCount, searchFreshness, setSearchFreshness,
+    readerKey, setReaderKey, webEnabled, setWebEnabled,
+    webReady, webOn, webSummary, searchCfg,
+    refs, refPlan, pickedRefs, refsLoading, refsError, refsQuery, setRefsError,
+    searchRefs, addRefByUrl, fetchRefText, toggleRef, removeRef, clearRefs, insertSources,
     // 流式输出 / 大纲先行
     streamEnabled, setStreamEnabled,
     outline, genOutline, writeFromOutline, clearOutline,
@@ -849,6 +997,7 @@ export function AppProvider({ children }) {
     itTheme, itRatio, itScale, itCards, itLoading, itError, itNote, itCopied,
     itImportDraft, itSplit, itExportOne, itExportAll, itCopyText,
     itMode, setItMode, itTopic, setItTopic, itRefNote, setItRefNote,
+    itRefLoading, itFetchRefNote,
     itGenerate, itTitles, itTitlesLoading, itGenTitles, itPickTitle,
     itCaption, itCaptionLoading, itCaptionCopied, itGenCaption, itCopyCaption,
   };

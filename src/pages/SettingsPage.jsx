@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useApp } from "../store";
 import { MODELS, listModels, isTauri } from "../lib/api";
+import { SEARCH_PROVIDERS, SEARCH_FRESHNESS, testSearch } from "../lib/websearch";
 import { chipCls, btnCls, inputCls, sectionLabelCls } from "../ui";
 
 // 路径中间省略:头尾信息量最大(盘符 / 最后一级目录名),砍中间
@@ -36,8 +37,13 @@ export default function SettingsPage() {
     streamEnabled, setStreamEnabled,
     articlesDir, storageError, storageBusy, migratePending, migrateNote,
     pickArticlesDir, confirmMigrate, resetArticlesDir, openArticlesDir,
+    searchProvider, setSearchProvider, searchKey, setSearchKey,
+    searchCount, setSearchCount, searchFreshness, setSearchFreshness,
+    readerKey, setReaderKey, webEnabled, setWebEnabled, webReady, searchCfg,
   } = useApp();
   const [resetConfirm, setResetConfirm] = useState(false); // 恢复默认存储的两步确认
+  const [searchTesting, setSearchTesting] = useState(false);
+  const [searchTest, setSearchTest] = useState(null); // {ok, msg}
   const [presetHint, setPresetHint] = useState("");   // 选中预设后的接入提示
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null); // {ok, msg, models?}
@@ -59,6 +65,17 @@ export default function SettingsPage() {
   const applyPreset = (p) => {
     setApiFormat(p.format); setApiHost(p.host);
     setPresetHint(p.hint); setTestResult(null);
+  };
+
+  const testSearchConnection = async () => {
+    setSearchTesting(true); setSearchTest(null);
+    try {
+      const n = await testSearch(searchCfg());
+      setSearchTest({ ok: true, msg: `连接成功,返回 ${n} 条结果` });
+    } catch (e) {
+      setSearchTest({ ok: false, msg: e.message || "连接失败" });
+    }
+    setSearchTesting(false);
   };
 
   const testConnection = async () => {
@@ -284,6 +301,110 @@ export default function SettingsPage() {
                 写作时文字逐字落到编辑器,不用干等整篇生成完;服务不支持流式会自动退回一次性返回
               </div>
             </div>
+          </div>
+        </section>
+
+        {/* 联网搜索:让 AI 写之前先查资料。搜索按次计费,所以和模型一样用户自带 Key */}
+        <section>
+          <div className={sectionLabelCls + " mb-2.5"}>联网搜索</div>
+
+          <div role="button" tabIndex={0}
+            onClick={() => setWebEnabled(!webEnabled)}
+            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setWebEnabled(!webEnabled); } }}
+            className={chipCls(webEnabled && webReady) + " flex items-center gap-2.5 px-3 py-2.5"}>
+            <span className={"flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] text-[10px] text-white " +
+              (webEnabled ? "border-[1.5px] border-indigo bg-indigo" : "border-[1.5px] border-ink-faint bg-transparent")}>
+              {webEnabled ? "✓" : ""}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className={"text-[13px] font-semibold " + (webEnabled && webReady ? "text-indigo" : "text-ink")}>
+                写作时联网查资料
+              </div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                开启后落笔/列大纲/图文直出前会先检索一遍,把结果作为事实依据注入;写作页可以看到并挑选具体用了哪几条
+              </div>
+            </div>
+            {webEnabled && !webReady && (
+              <span className="shrink-0 rounded-full bg-paper-deep px-2 py-px text-[10px] text-seal">尚未填 Key</span>
+            )}
+          </div>
+
+          <div className="mt-3 mb-1.5 text-[11px] text-ink-faint">搜索源(自带 Key,按次计费;和模型 Key 是两回事)</div>
+          <div className="grid grid-cols-2 gap-2">
+            {SEARCH_PROVIDERS.map(p => {
+              const active = searchProvider === p.id;
+              return (
+                <button key={p.id} onClick={() => { setSearchProvider(p.id); setSearchTest(null); }}
+                  className={chipCls(active) + " px-3 py-2.5"}>
+                  <div className={"text-[13px] font-semibold " + (active ? "text-indigo" : "text-ink")}>{p.name}</div>
+                  <div className="mt-0.5 text-[10px] leading-relaxed text-ink-faint">{p.desc}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          {searchProvider && (
+            <div className="mt-2.5 flex flex-col gap-2.5">
+              <div className="rounded-md bg-paper-deep px-2.5 py-2 text-[11px] leading-[1.7] text-ink-faint">
+                {SEARCH_PROVIDERS.find(p => p.id === searchProvider)?.hint}
+                {" "}申请地址:{SEARCH_PROVIDERS.find(p => p.id === searchProvider)?.site}
+              </div>
+              <div>
+                <div className="mb-1.5 text-[11px] text-ink-faint">搜索 API Key(保存在本机,不会上传)</div>
+                <input value={searchKey} onChange={e => { setSearchKey(e.target.value); setSearchTest(null); }}
+                  type="password" placeholder="sk-…" autoComplete="off" spellCheck={false} className={inputCls} />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="mb-1.5 text-[11px] text-ink-faint">每次取几条</div>
+                  <div className="flex gap-1.5">
+                    {[3, 5, 8].map(n => (
+                      <button key={n} onClick={() => setSearchCount(n)}
+                        className={"flex-1 cursor-pointer rounded-md border py-1.5 text-center text-xs transition-all " +
+                          (searchCount === n ? "border-indigo bg-indigo-bg font-semibold text-indigo" : "border-line bg-white text-ink-soft hover:border-indigo")}>
+                        {n} 条
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1.5 text-[11px] text-ink-faint">时间范围</div>
+                  <select value={searchFreshness} onChange={e => setSearchFreshness(e.target.value)}
+                    className="box-border w-full cursor-pointer rounded-md border border-line bg-white px-2.5 py-[7px] font-sans text-xs text-ink">
+                    {SEARCH_FRESHNESS.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <button onClick={testSearchConnection} disabled={searchTesting || !searchKey.trim()}
+                    className={btnCls + " rounded-full px-3.5 py-1.5 text-xs"}>
+                    {searchTesting ? "测试中…" : "测试搜索连接"}
+                  </button>
+                  {searchTest?.ok && <span className="text-xs text-indigo">✓ {searchTest.msg}</span>}
+                </div>
+                {searchTest && !searchTest.ok && (
+                  <div className="mt-2 text-xs leading-relaxed text-seal">{searchTest.msg}</div>
+                )}
+              </div>
+
+              <div>
+                <div className="mb-1.5 text-[11px] text-ink-faint">
+                  网页抓取 Key(可选):抓链接正文用的是 Jina Reader,免 Key 就能用(20 次/分钟),填了提到 200 次/分钟
+                </div>
+                <input value={readerKey} onChange={e => setReaderKey(e.target.value)} type="password"
+                  placeholder="jina_…(留空即可)" autoComplete="off" spellCheck={false} className={inputCls} />
+              </div>
+            </div>
+          )}
+
+          <div className="mt-2 rounded-md bg-paper-deep px-2.5 py-2 text-[11px] leading-[1.7] text-ink-faint">
+            {isTauri
+              ? "桌面端走原生请求,不受浏览器跨域限制。"
+              : "浏览器生产环境直连搜索服务需要对方允许跨域(CORS),开发模式经本地代理转发不受影响;桌面端无此限制。"}
+            {" 检索到的资料只在本次会话内有效,刷新即清空;换写法/精简/润色/起标题不会注入资料——那几个操作面对的是已经写好的正文。"}
           </div>
         </section>
 
