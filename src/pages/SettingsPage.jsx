@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { useApp } from "../store";
-import { MODELS, listModels } from "../lib/api";
+import { MODELS, listModels, isTauri } from "../lib/api";
 import { chipCls, btnCls, inputCls, sectionLabelCls } from "../ui";
+
+// 路径中间省略:头尾信息量最大(盘符 / 最后一级目录名),砍中间
+const midEllipsis = (s, max = 46) =>
+  !s || s.length <= max ? (s || "") : `${s.slice(0, max - 20)} … ${s.slice(-17)}`;
 
 const API_FORMATS = [
   { id: "anthropic", name: "Claude 格式", path: "/v1/messages" },
@@ -30,7 +34,10 @@ export default function SettingsPage() {
     savedProviders, saveProvider, removeProvider, applyProvider,
     modelId, setModelId, customModel, setCustomModel, modelSummary,
     streamEnabled, setStreamEnabled,
+    articlesDir, storageError, storageBusy, migratePending, migrateNote,
+    pickArticlesDir, confirmMigrate, resetArticlesDir, openArticlesDir,
   } = useApp();
+  const [resetConfirm, setResetConfirm] = useState(false); // 恢复默认存储的两步确认
   const [presetHint, setPresetHint] = useState("");   // 选中预设后的接入提示
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null); // {ok, msg, models?}
@@ -277,6 +284,74 @@ export default function SettingsPage() {
                 写作时文字逐字落到编辑器,不用干等整篇生成完;服务不支持流式会自动退回一次性返回
               </div>
             </div>
+          </div>
+        </section>
+
+        {/* 文章存储:桌面端可把文库指到任意文件夹,每篇一个 .md */}
+        <section>
+          <div className={sectionLabelCls + " mb-2.5"}>文章存储</div>
+
+          <div className={chipCls(!!articlesDir) + " cursor-default px-3 py-2.5"}>
+            <div className="flex items-baseline gap-2">
+              <div className={"text-[13px] font-semibold " + (articlesDir ? "text-indigo" : "text-ink")}>
+                {articlesDir ? "自选文件夹" : "应用内部存储(默认)"}
+              </div>
+              {!isTauri && (
+                <span className="rounded-full bg-paper-deep px-2 py-px text-[10px] text-ink-faint">仅桌面端可用</span>
+              )}
+            </div>
+
+            {/* 路径可能很长:中间省略,完整路径挂 title 悬停可见 */}
+            <div className="mt-1 font-mono text-[11px] break-all text-ink-soft" title={articlesDir || undefined}>
+              {articlesDir ? midEllipsis(articlesDir) : "文章存在本机应用数据目录里"}
+            </div>
+
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              <button onClick={pickArticlesDir} disabled={!isTauri || storageBusy}
+                className={btnCls + " rounded-full px-3 py-1 text-xs"}>
+                {articlesDir ? "换个文件夹…" : "选择文件夹…"}
+              </button>
+              <button onClick={openArticlesDir} disabled={!isTauri || !articlesDir || storageBusy}
+                className={btnCls + " rounded-full px-3 py-1 text-xs"}>
+                打开文件夹
+              </button>
+              {articlesDir && (resetConfirm ? (
+                <button onClick={() => { resetArticlesDir(); setResetConfirm(false); }}
+                  onBlur={() => setResetConfirm(false)}
+                  className="cursor-pointer rounded-full border border-ink bg-ink px-3 py-1 text-xs text-white transition-opacity hover:opacity-80">
+                  确认恢复?文件不会被删除
+                </button>
+              ) : (
+                <button onClick={() => setResetConfirm(true)} disabled={storageBusy}
+                  className={btnCls + " rounded-full px-3 py-1 text-xs"}>
+                  恢复默认存储
+                </button>
+              ))}
+            </div>
+
+            {/* 迁移确认:内联两步式,与文章库删除同一范式,不弹 window.confirm */}
+            {migratePending && (
+              <div className="mt-2.5 rounded-md bg-paper-deep px-2.5 py-2 text-[11px] leading-[1.7] text-ink-soft">
+                这个文件夹里已有 {migratePending.existing} 篇。把当前的 {migratePending.mine.length} 篇也复制过去吗?
+                <div className="mt-1.5 flex gap-2">
+                  <button onClick={() => confirmMigrate(true)} className={btnCls + " rounded-full px-3 py-1 text-xs"}>
+                    复制过去
+                  </button>
+                  <button onClick={() => confirmMigrate(false)} className={btnCls + " rounded-full px-3 py-1 text-xs"}>
+                    只用文件夹里已有的
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {migrateNote && <div className="mt-2 text-[11px] text-ink-faint">{migrateNote}</div>}
+            {storageError && <div className="mt-2 text-[11px] leading-relaxed text-seal">{storageError}</div>}
+          </div>
+
+          <div className="mt-2 rounded-md bg-paper-deep px-2.5 py-2 text-[11px] leading-[1.7] text-ink-faint">
+            {isTauri
+              ? "选定后,每篇文章会存成一个 .md 文件(frontmatter 记标题/平台/语气),可以直接用 Obsidian 等编辑器打开,也能放进网盘目录同步。"
+              : "浏览器版本拿不到本机路径,文章存在浏览器本地存储里;想把文章落成文件请用桌面端。"}
           </div>
         </section>
 

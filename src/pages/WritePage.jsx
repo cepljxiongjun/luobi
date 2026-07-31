@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useApp } from "../store";
 import { MODELS } from "../lib/api";
 import { PLATFORMS, TONES, QUICK_ACTIONS, INLINE_ACTIONS, customAction } from "../lib/presets";
+import { scopeLabels, describe } from "../lib/skills";
 import Fold from "../components/Fold";
 import SelectionToolbar from "../components/SelectionToolbar";
 import ContextMenu from "../components/ContextMenu";
@@ -22,7 +23,7 @@ export default function WritePage() {
     updateOutlineItem, removeOutlineItem, addOutlineItem, moveOutlineItem,
     modelId, setModelId, customModel, setCustomModel, apiMode, setApiMode, modelSummary,
     customModels, customApiModel, setCustomApiModel,
-    skills, skillSummary, importSkills, toggleSkill, removeSkill,
+    skills, skillSummary, skillPlan, toggleSkill, skillAction,
   } = useApp();
   const [modelMenuOpen, setModelMenuOpen] = useState(false); // 主题卡片里的模型下拉菜单
   const [sel, setSel] = useState(null);         // 正文选区 {start,end}|null
@@ -197,39 +198,57 @@ export default function WritePage() {
           </div>
         </section>
 
+        {/* 这里只做快速开关;编写/查看全文去 /skills(左栏 320px 塞不下编辑器) */}
         <Fold title="写作技能" summary={skillSummary}>
           <div className="flex flex-col gap-2">
-            {skills.map(s => (
-              <div key={s.id} role="button" tabIndex={0}
-                onClick={() => toggleSkill(s.id)}
-                onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSkill(s.id); } }}
-                className={chipCls(s.enabled) + " px-3 py-[9px]"}>
-                <div className="flex items-center gap-2">
-                  <span className={"flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] text-[10px] text-white " +
-                    (s.enabled ? "border-[1.5px] border-indigo bg-indigo" : "border-[1.5px] border-ink-faint bg-transparent")}>
-                    {s.enabled ? "✓" : ""}
-                  </span>
-                  <span className={"min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[13px] font-semibold " +
-                    (s.enabled ? "text-indigo" : "text-ink")}>{s.name}</span>
-                  {s.builtin ? (
-                    <span className="shrink-0 rounded-[3px] border border-line px-[5px] py-px text-[10px] text-ink-faint">内置</span>
-                  ) : (
-                    <button onClick={e => { e.stopPropagation(); removeSkill(s.id); }} aria-label={`删除技能 ${s.name}`}
-                      className="shrink-0 cursor-pointer border-none bg-transparent px-1 py-0.5 text-sm leading-none text-ink-faint">×</button>
+            {skills.map(s => {
+              // 作用域不匹配当前平台的降饱和 + 标注,把"为什么这条没生效"变成可见的
+              const offPlatform = s.platforms && !s.platforms.includes(platform.id);
+              const overBudget = skillPlan.dropped.some(d => d.id === s.id);
+              const scope = scopeLabels(s);
+              return (
+                <div key={s.id} role="button" tabIndex={0}
+                  onClick={() => toggleSkill(s.id)}
+                  onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSkill(s.id); } }}
+                  className={chipCls(s.enabled) + " px-3 py-[9px] " + (s.enabled && offPlatform ? "opacity-60" : "")}>
+                  <div className="flex items-center gap-2">
+                    <span role="checkbox" aria-checked={s.enabled}
+                      className={"flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] text-[10px] text-white " +
+                        (s.enabled ? "border-[1.5px] border-indigo bg-indigo" : "border-[1.5px] border-ink-faint bg-transparent")}>
+                      {s.enabled ? "✓" : ""}
+                    </span>
+                    <span className={"min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[13px] font-semibold " +
+                      (s.enabled ? "text-indigo" : "text-ink")}>{s.name}</span>
+                    {s.builtin && (
+                      <span className="shrink-0 rounded-[3px] border border-line px-[5px] py-px text-[10px] text-ink-faint">内置</span>
+                    )}
+                  </div>
+                  {/* 副标题用 description 而不是截 content:导入的 SKILL.md 截出来是 frontmatter 残渣 */}
+                  <div className="mt-[5px] line-clamp-2 text-[11px] leading-normal text-ink-faint">
+                    {describe(s)}
+                  </div>
+                  {(scope.length > 0 || overBudget) && s.enabled && (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {scope.map(b => (
+                        <span key={b} className="rounded-full bg-paper-deep px-1.5 py-px text-[10px] text-ink-faint">{b}</span>
+                      ))}
+                      {overBudget && (
+                        <span className="rounded-full bg-paper-deep px-1.5 py-px text-[10px] text-ink-faint">超预算未注入</span>
+                      )}
+                    </div>
                   )}
                 </div>
-                <div className="mt-[5px] line-clamp-2 text-[11px] leading-normal text-ink-faint">{s.content}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
           <div className="mt-2.5 flex items-center gap-2.5">
-            <span className="flex-1 text-[11px] leading-relaxed text-ink-faint">启用的技能会在每次生成时生效</span>
-            <button onClick={() => fileInputRef.current?.click()}
+            <span className="flex-1 text-[11px] leading-relaxed text-ink-faint">
+              技能按当前平台与操作自动生效
+            </span>
+            <button onClick={() => nav("/skills")}
               className={btnCls + " shrink-0 rounded-full px-3 py-1 text-xs"}>
-              + 导入 .md / .txt
+              管理技能 →
             </button>
-            <input ref={fileInputRef} type="file" accept=".md,.txt,.markdown" multiple
-              onChange={e => { importSkills(e.target.files); e.target.value = ""; }} className="hidden" />
           </div>
         </Fold>
       </aside>
@@ -610,8 +629,10 @@ export default function WritePage() {
       {/* 右键菜单挂在滚动栏之外:fixed 弹层放进滚动/sticky 容器会被困住(踩过的坑) */}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} selCount={selCount} canUndo={canUndo} busy={busy}
+          skills={skills.filter(s => s.enabled && (!s.platforms || s.platforms.includes(platform.id)))}
           onAction={a => runLocal(a, sel)}
           onCustom={t => runLocal(customAction(t), sel)}
+          onSkill={s => runLocal(skillAction(s), sel)}
           onUndo={() => { setMenu(null); setAccept(null); undoLast(); }}
           onCopySel={() => {
             if (sel) navigator.clipboard?.writeText(content.slice(sel.start, sel.end)).catch(() => {});

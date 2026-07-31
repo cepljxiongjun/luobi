@@ -5,6 +5,7 @@ import WritePage from "./pages/WritePage";
 import ImageTextPage from "./pages/ImageTextPage";
 import ArticlesPage from "./pages/ArticlesPage";
 import SettingsPage from "./pages/SettingsPage";
+import SkillsPage from "./pages/SkillsPage";
 
 // HashRouter:Tauri 生产环境从本地文件加载 index.html,hash 路由无需服务端 fallback
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
             <Route path="/write" element={<WritePage />} />
             <Route path="/imagetext" element={<ImageTextPage />} />
             <Route path="/articles" element={<ArticlesPage />} />
+            <Route path="/skills" element={<SkillsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/write" replace />} />
           </Route>
