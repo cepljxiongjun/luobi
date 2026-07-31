@@ -20,7 +20,9 @@ function llmProxy() {
         for await (const chunk of req) chunks.push(chunk);
         const body = Buffer.concat(chunks);
         const headers = {};
-        for (const h of ["content-type", "x-api-key", "authorization", "anthropic-version"]) {
+        // accept 是给 Jina Reader 用的(application/json 才返回结构化正文);
+        // x-api-key 同时服务于 Claude 格式与 Serper 搜索,两边头名恰好一致
+        for (const h of ["content-type", "accept", "x-api-key", "authorization", "anthropic-version"]) {
           if (req.headers[h]) headers[h] = req.headers[h];
         }
         try {
