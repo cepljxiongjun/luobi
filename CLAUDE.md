@@ -23,6 +23,7 @@ src/
     ContextMenu.jsx     # 正文右键菜单(全部操作 + 自定义指令 + 复制选中 + 撤销)
     AcceptBar.jsx       # 局部改写完成后的「保留 / 撤销」条
     RefsPanel.jsx       # 联网资料面板(检索/贴链接抓正文/逐条勾选/插入参考来源)
+    ActivityOrb.jsx     # 右下角悬浮过程指示器(思考中/联网中/抓取中 + 点开看完整提示词)
   pages/
     WritePage.jsx       # 写作页(平台/语气/技能 + 编辑器,保存/导出 .md)
     ImageTextPage.jsx   # 图文生成页(拆卡 + 卡片预览/导出)
@@ -103,7 +104,15 @@ src/
    - 「插入参考来源」把勾选的来源作为清单追加到正文末尾,**不自动加**:知乎需要、小红书绝不需要,这个判断只有用户能下
    - `openExternal` 打开原文链接:桌面端 WebView 吞掉 `target="_blank"`,必须走 opener 插件。capabilities 加的是 `opener:allow-open-url` + `opener:allow-default-urls`(只放行 http/https/mailto/tel),**不含 `open-path`**,所以这条通道打不开本地文件
    - Vite 代理的转发头白名单加了 `accept`(Jina 要它才返回结构化正文);Serper 的 `X-API-KEY` 与 Claude 格式头名恰好一致,不用另加
-4. **模型设置页** `/settings`:接入方式(内置/自定义)、内置模型单选、自定义接入表单(API 格式/Host/Key/模型名),修改即时生效并自动保存本机;写作页模型下拉保留快速切换,「自定义接入…」跳转设置页
+4. **过程可见**(`components/ActivityOrb.jsx` + store 的 `trace`):右下角常驻悬浮球,AI 在忙时显示「思考中 / 联网中 / 抓取中」+ 当前这一步在做什么,点开是最近 30 步的过程面板
+   - **每一步都能展开看原样的请求**:模型步给出「注入了哪几条技能 / 几条资料」的结论,再给系统提示词全文、这次的指令、模型返回;检索步给出搜索源与命中列表(可点开原文);抓取步给出 URL 与抓到的字数
+   - 与「联网资料可见可否决」是同一个立场的两半:**模型给的是结果,过程全在暗处**。用户想知道「这段数字哪来的」「为什么这次写得不像我要的」,唯一的答案在提示词里
+   - **留痕点收在两个包装函数里**:正文类走 `runProse`,要 JSON 的走 `runJson(op, prompt, system, platformId?, label?)`——所以 store 里不再有裸的 `callAI` 调用,新增功能只要走这两个入口就自动留痕
+   - `system` 在 `runProse` 里**只拼一次**:它同时要发给模型和记进面板,拼两次会出现"面板里显示的与实际发出去的不是同一份"这种最难查的偏差
+   - `traceRef` 与 `refsRef` 同源:一步的开始与结束之间跨了 `await`,读 state 会读到旧的
+   - **设置页的两个「测试连接」故意不留痕**:面板记的是「为了写这篇稿子做了什么」,不是网络活动日志;它们的结果本来就显示在按钮旁边
+   - 面板里不含任何 Key(系统提示词与指令里本来就没有),只留最近 30 步,刷新即清空
+5. **模型设置页** `/settings`:接入方式(内置/自定义)、内置模型单选、自定义接入表单(API 格式/Host/Key/模型名),修改即时生效并自动保存本机;写作页模型下拉保留快速切换,「自定义接入…」跳转设置页
    - Claude 格式 `/v1/messages`(x-api-key 头)/ OpenAI 兼容 `/v1/chat/completions`(Bearer 头),可接 One-API、DeepSeek、智谱、Ollama、vLLM 等
    - `buildEndpoint` 兼容各种 Host 写法:裸域名、带 `/v1`(DeepSeek)、带 `/api/paas/v4`(智谱)、完整端点,自动归一化,不会拼出 `/v1/v1/...`
    - **常用服务预设**(chips 一键填 Host+格式+提示):Ollama `localhost:11434` / vLLM `localhost:8000` / LM Studio `localhost:1234` / DeepSeek / 智谱 GLM
@@ -204,8 +213,12 @@ ui: 左栏低频设置折叠,默认一屏放下
 
 ## CI / 发布(GitHub Actions)
 
-- `.github/workflows/ci.yml`:推送到 main/master 或提 PR 时,验证网页构建(ubuntu)+ 桌面端 `cargo check`(windows)
-- `.github/workflows/release.yml`:推送 `v*` tag(如 `v0.1.0`)时,自动打包 Windows 安装程序并创建 GitHub Release 草稿(tauri-action)
+- `.github/workflows/ci.yml`:推送到 main/master 或提 PR 时,验证网页构建(ubuntu)+ 桌面端 `cargo check`(**windows 与 macos 各一遍**)
+- `.github/workflows/release.yml`:推送 `v*` tag(如 `v0.1.0`)时,**并行打 Windows 与 macOS 两个包**并写进同一个 GitHub Release 草稿(tauri-action)
+  - macOS 出的是 **universal 通用二进制**(`--target universal-apple-darwin`,需要先 `rustup target add` 两个架构,workflow 里由 `dtolnay/rust-toolchain` 的 `targets` 负责)。体积大一点,换掉「我该下哪个」这个必然有人问错的问题
+  - `fail-fast: false`:一个平台挂了另一个照样出包
+  - **没有 Apple 开发者签名**,所以 macOS 首次打开会提示「已损坏,无法打开」。Release 正文里写了绕过办法:`xattr -dr com.apple.quarantine /Applications/落笔.app`。要根治得买 99 美元/年的开发者账号并配公证(notarization),那是发布策略问题不是代码问题
+  - 两个 job 会先后写同一个 Release,所以 `releaseBody` 写成平台无关的,谁先跑完都一样
 - 发布流程:改 `package.json` 与 `src-tauri/tauri.conf.json` 里的版本号 → 提交 → `git tag v0.1.0 && git push --tags` → 到 GitHub Releases 页把草稿发布
 
 ## 常用命令
@@ -215,5 +228,9 @@ npm install          # 首次安装依赖
 npm run dev          # 网页开发 http://localhost:5173
 npm run build        # 网页生产构建
 npm run tauri dev    # 桌面端开发
-npm run tauri build  # 桌面端打包安装程序
+npm run tauri build  # 桌面端打包安装程序(当前平台)
+
+# macOS 上打通用包(Apple 芯片 + Intel 一个 .dmg 通吃)
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+npm run tauri build -- --target universal-apple-darwin
 ```

@@ -24,8 +24,13 @@ jobs:
         run: npm run build
 
   check-tauri:
-    name: 桌面端编译检查
-    runs-on: windows-latest
+    # 两个平台都编一遍。发版时才发现 macOS 编不过,意味着 tag 已经打出去了
+    name: 桌面端编译检查(${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +44,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.os }}
 
       - name: 安装依赖
         run: npm ci

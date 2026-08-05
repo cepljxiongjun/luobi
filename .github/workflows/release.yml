@@ -11,8 +11,23 @@ permissions:
 
 jobs:
   build-tauri:
-    name: 打包 Windows 安装程序
-    runs-on: windows-latest
+    name: 打包 ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了,另一个照样出包 —— 总比两手空空强
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 出通用二进制:一个 .dmg 同时装得上 Apple 芯片和 Intel 机器。
+          # 体积大一点,换掉"我该下哪个"这个必然会有人问错的问题
+          - os: macos-latest
+            label: macOS(通用)
+            args: --target universal-apple-darwin
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - os: windows-latest
+            label: Windows
+            args: ""
+            targets: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -22,10 +37,13 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.os }}
 
       - name: 安装依赖
         run: npm ci
@@ -35,8 +53,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}
           releaseName: "落笔 ${{ github.ref_name }}"
-          releaseBody: "见下方附件:Windows 安装程序(.msi / .exe)"
+          # 两个 job 会先后写同一个 Release,正文写成平台无关的,谁先跑完都一样
+          releaseBody: |
+            下方附件按平台取用:
+
+            - **Windows**:`.msi` 或 `.exe` 安装程序
+            - **macOS**:`.dmg`(通用二进制,Apple 芯片与 Intel 机器都能装)
+
+            > macOS 首次打开若提示「已损坏,无法打开」,是因为这个包没有 Apple 开发者签名。
+            > 在终端执行一次即可:`xattr -dr com.apple.quarantine /Applications/落笔.app`
           releaseDraft: true
           prerelease: false
