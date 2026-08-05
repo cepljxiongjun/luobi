@@ -25,8 +25,10 @@ export default function WritePage() {
     modelId, setModelId, customModel, setCustomModel, apiMode, setApiMode, modelSummary,
     customModels, customApiModel, setCustomApiModel,
     skills, skillSummary, skillPlan, toggleSkill, skillAction,
-    webSummary, webOn, refsLoading, searchRefs,
+    webSummary, webOn, refsLoading, searchRefs, webReady,
+    inspo, inspoLoading, inspoError, inspoField, genTopicIdeas, pickTopicIdea, clearInspo,
   } = useApp();
+  const [inspoInput, setInspoInput] = useState(""); // 选题灵感的领域词输入
   const [modelMenuOpen, setModelMenuOpen] = useState(false); // 主题卡片里的模型下拉菜单
   const [sel, setSel] = useState(null);         // 正文选区 {start,end}|null
   const [anchor, setAnchor] = useState(null);   // 浮条/接受条锚点(正文卡片相对坐标)
@@ -199,6 +201,57 @@ export default function WritePage() {
             ))}
           </div>
         </section>
+
+        {/* 选题灵感(对标易撰的热点选题):不知道写什么时,从当下讨论里挑一个 */}
+        <Fold title="选题灵感" summary={inspo.length ? `${inspo.length} 个选题 · ${inspoField}` : (webReady ? "从热点里找选题" : "需联网")}>
+          {!webReady ? (
+            <div className="text-[11px] leading-relaxed text-ink-faint">
+              选题灵感需要联网检索当下讨论。到「设置 → 联网搜索」配好搜索源,
+              这里就能按领域出带切入角度的选题。
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <div className="flex gap-1.5">
+                <input value={inspoInput} onChange={e => setInspoInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") genTopicIdeas(inspoInput); }}
+                  placeholder="领域词,如:职场 / AI / 育儿"
+                  className="min-w-0 flex-1 rounded-md border border-line bg-white px-2.5 py-1.5 font-sans text-xs text-ink placeholder:text-ink-faint" />
+                <button onClick={() => genTopicIdeas(inspoInput)} disabled={inspoLoading || !inspoInput.trim()}
+                  className={btnCls + " shrink-0 rounded-md px-2.5 text-xs"}>
+                  {inspoLoading ? "提炼中…" : "找选题"}
+                </button>
+              </div>
+              {inspoError && <div className="text-[11px] leading-relaxed text-seal">{inspoError}</div>}
+              {inspo.length > 0 && (
+                <>
+                  <div className="flex flex-col gap-1.5">
+                    {inspo.map((x, i) => {
+                      const picked = topic.startsWith(x.title);
+                      return (
+                        <button key={i} onClick={() => pickTopicIdea(x)}
+                          title="点击把选题与切入角度填进主题框"
+                          className={"cursor-pointer rounded-md border px-2.5 py-2 text-left transition-all " +
+                            (picked ? "border-indigo bg-indigo-bg" : "border-line bg-white hover:border-indigo")}>
+                          <div className={"text-[12px] leading-snug font-semibold " + (picked ? "text-indigo" : "text-ink")}>
+                            {picked && "✓ "}{x.title}
+                          </div>
+                          {x.angle && <div className="mt-0.5 text-[11px] leading-normal text-ink-soft">{x.angle}</div>}
+                          {x.why && <div className="mt-0.5 text-[10px] leading-normal text-ink-faint">⏱ {x.why}</div>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="flex-1 text-[10px] text-ink-faint">基于最近一周「{inspoField}」的讨论提炼</span>
+                    <button onClick={clearInspo} className={btnCls + " shrink-0 rounded-full px-2.5 py-1 text-[11px]"}>
+                      清空
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </Fold>
 
         {/* 联网资料:AI 查到了什么必须是可见、可否决的,否则用户没法判断稿子可不可信 */}
         <Fold title="联网资料" summary={webSummary}>

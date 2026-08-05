@@ -7,7 +7,7 @@ import { parseSkillFile, selectSkills, renderSkillsBlock, skillAction,
 import { IT_THEMES, IT_RATIOS, IT_FONT_SIZES, localSplitCards, normalizeCards, drawCardCanvas } from "./lib/cards";
 import { SEARCH_PROVIDERS, SEARCH_FRESHNESS, searchConfigured, webSearch, readUrl,
   selectRefs, renderRefsBlock, renderSourceList, REF_TEXT_MAX } from "./lib/websearch";
-import { loadSettings, saveSettings, saveArticles, loadSkills, saveSkills } from "./lib/storage";
+import { loadSettings, saveSettings, saveArticles, loadSkills, saveSkills, loadDraft, saveDraft } from "./lib/storage";
 import { readAll, syncAll, setSynced, firstSyncedFile, pickDir, revealDir, migrate } from "./lib/articlesFs";
 
 // 全局状态:草稿、API 配置、技能、图文卡片都放在这里,
@@ -157,8 +157,74 @@ export function AppProvider({ children }) {
       setSynced(r.map);
       if (r.error) setStorageError(r.error);
       setArticlesReady(true);
+
+      // 草稿恢复:必须排在文章库读完之后——currentArticleId 要对着实际存在的
+      // 文章校验(文件夹可能在外部被改过)。每个字段都过防线,坏数据不上屏
+      try {
+        const d = await loadDraft();
+        if (d && typeof d === "object") {
+          const w = d.write || {};
+          if (typeof w.topic === "string") setTopic(w.topic);
+          if (typeof w.docTitle === "string") setDocTitle(w.docTitle);
+          if (typeof w.content === "string") setContent(w.content);
+          if (Array.isArray(w.titles)) setTitles(w.titles.filter(x => typeof x === "string").slice(0, 5));
+          if (Array.isArray(w.outline)) {
+            setOutline(w.outline.filter(o => o && (o.heading || o.note)).slice(0, 8).map(o => ({
+              heading: String(o.heading || "").slice(0, 40), note: String(o.note || "").slice(0, 120),
+            })));
+          }
+          const p = PLATFORMS.find(x => x.id === w.platformId); if (p) setPlatform(p);
+          const t = TONES.find(x => x.id === w.toneId); if (t) setTone(t);
+          if (w.articleId && r.articles.some(a => a.id === w.articleId)) setCurrentArticleId(w.articleId);
+
+          if (Array.isArray(d.refs?.items)) {
+            // 恢复必须走 putRefs:state 与 refsRef 镜像要同步,否则恢复后
+            // 第一次落笔拼提示词读到的是空镜像
+            const items = d.refs.items
+              .filter(x => x && typeof x.url === "string" && x.url)
+              .slice(0, 30)
+              .map((x, i) => ({
+                id: typeof x.id === "string" ? x.id : `r-restored-${i}`,
+                title: String(x.title || ""), url: x.url,
+                snippet: String(x.snippet || "").slice(0, 400),
+                site: String(x.site || ""), date: String(x.date || ""),
+                text: String(x.text || "").slice(0, REF_TEXT_MAX),
+                picked: x.picked !== false, from: x.from === "url" ? "url" : "search",
+              }));
+            if (items.length) putRefs(items);
+            if (typeof d.refs.query === "string") setRefsQuery(d.refs.query);
+          }
+
+          const it = d.it || {};
+          if (it.mode === "topic" || it.mode === "article") setItMode(it.mode);
+          if (typeof it.source === "string") setItSource(it.source);
+          if (typeof it.topic === "string") setItTopic(it.topic);
+          if (typeof it.refNote === "string") setItRefNote(it.refNote);
+          if (typeof it.caption === "string") setItCaption(it.caption);
+          if (it.cards) { const c = normalizeCards(it.cards); if (c) setItCards(c); }
+        }
+      } catch { /* 草稿坏了就当没有,绝不因此打不开应用 */ }
+      setDraftReady(true);
     });
   }, []);
+
+  // ---- 草稿持久化:变更后防抖保存(比设置的 300ms 松,正文是逐字敲的) ----
+  const [draftReady, setDraftReady] = useState(false);
+  const draftTimer = useRef(null);
+  useEffect(() => {
+    if (!draftReady) return; // 恢复完成前不回写,避免默认空值覆盖已存草稿
+    clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => saveDraft({
+      v: 1,
+      write: { topic, docTitle, content, titles, outline,
+        platformId: platform.id, toneId: tone.id, articleId: currentArticleId },
+      refs: { query: refsQuery, items: refs },
+      it: { mode: itMode, source: itSource, topic: itTopic, refNote: itRefNote,
+        cards: itCards, caption: itCaption },
+    }), 800);
+    return () => clearTimeout(draftTimer.current);
+  }, [draftReady, topic, docTitle, content, titles, outline, platform, tone, currentArticleId,
+    refs, refsQuery, itMode, itSource, itTopic, itRefNote, itCards, itCaption]);
 
   useEffect(() => {
     if (!hydrated) return; // 水合完成前不回写,避免默认值覆盖已存设置
@@ -400,6 +466,59 @@ export function AppProvider({ children }) {
       return text;
     } catch (e) { traceEnd(id, { error: e.message || "调用失败" }); throw e; }
   };
+
+  // ---- 选题灵感(对标易撰的热点选题):领域词 → 检索当下讨论 → 提炼成选题卡 ----
+  // 检索结果刻意不进 refs 面板:它们是"写什么"的素材,不是"怎么写"的资料,
+  // 混进去会污染落笔时注入的内容。用户点了某个选题后,现有的自动检索会按
+  // 新主题再查一次,链路天然衔接。
+  // 选题结果也不随草稿持久化——热点有时效性,过夜就馊了,刻意只留会话内
+  const [inspo, setInspo] = useState([]);          // [{title, angle, why}]
+  const [inspoLoading, setInspoLoading] = useState(false);
+  const [inspoError, setInspoError] = useState("");
+  const [inspoField, setInspoField] = useState(""); // 最近一次用的领域词
+
+  const genTopicIdeas = async (field) => {
+    const f = String(field || "").trim();
+    if (!f) { setInspoError("先写一个领域词,比如「职场」「AI」「育儿」"); return; }
+    if (!webReady) { setInspoError("选题灵感需要联网:请到设置页配置搜索源"); return; }
+    setInspoError(""); setInspoLoading(true);
+    const t = traceStart("web", `检索「${f}」的热点讨论`, {
+      query: f, provider: searchProvider, freshness: "oneWeek", count: 8,
+    });
+    try {
+      // 时效写死一周内:选题要的就是"现在大家在聊什么",跟着全局时效设置反而不对
+      const list = await webSearch(`${f} 热点 讨论 争议`, { ...searchCfg(), count: 8, freshness: "oneWeek" });
+      traceEnd(t, { detail: { results: list } });
+      const material = list.map((r, i) =>
+        `${i + 1}. ${r.title}${r.date ? `(${r.date})` : ""}\n${r.snippet}`).join("\n\n");
+      const raw = await runJson("inspire",
+        `下面是「${f}」领域最近一周的讨论。请从中提炼 5-8 个适合${platform.name}的选题,` +
+        `要求:每个选题有明确的切入角度、能说清"为什么现在写"(蹭到了哪个讨论),不要泛泛的常青题。` +
+        `只返回JSON数组,不要markdown代码块,格式:` +
+        `[{"title":"选题,15-25字","angle":"切入角度,15-30字","why":"为什么现在写,20-40字"}]\n\n${material}`,
+        `你是资深${platform.name}选题策划,擅长从当下讨论里找到有传播潜力又不同质化的切入点。`,
+        platform.id, "选题灵感");
+      const arr = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      if (!Array.isArray(arr) || arr.length === 0) throw new Error("返回格式异常");
+      setInspo(arr.slice(0, 8).map(x => ({
+        title: String(x.title || "").slice(0, 40),
+        angle: String(x.angle || "").slice(0, 60),
+        why: String(x.why || "").slice(0, 80),
+      })).filter(x => x.title));
+      setInspoField(f);
+    } catch (e) {
+      // 失败可能出在检索(t 还挂着)或提炼(t 已收尾、runJson 自己留了失败痕)
+      if (traceRef.current.some(s => s.id === t && s.status === "running")) traceEnd(t, { error: e.message });
+      setInspoError(`选题生成失败:${(e.message || "请重试").slice(0, 80)}`);
+    }
+    setInspoLoading(false);
+  };
+
+  // 点选题:主题框填入「选题 —— 切入角度」,让落笔时模型直接拿到角度
+  const pickTopicIdea = (idea) => {
+    setTopic(idea.angle ? `${idea.title} —— ${idea.angle}` : idea.title);
+  };
+  const clearInspo = () => { setInspo([]); setInspoError(""); setInspoField(""); };
 
   // ---- 联网:动作 ----
   const REF_LIST_MAX = 30; // 面板里最多留这么多条,再多用户自己也管不过来
@@ -1027,6 +1146,8 @@ export function AppProvider({ children }) {
     checkReport, checkStale, runCheck, applyIssue, dismissIssue,
     // 过程留痕
     trace, activity, clearTrace,
+    // 选题灵感
+    inspo, inspoLoading, inspoError, inspoField, genTopicIdeas, pickTopicIdea, clearInspo,
     // 联网:配置 / 资料
     searchProvider, setSearchProvider, searchKey, setSearchKey,
     searchCount, setSearchCount, searchFreshness, setSearchFreshness,
