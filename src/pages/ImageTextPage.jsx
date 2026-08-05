@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useApp } from "../store";
 import { IT_THEMES, IT_RATIOS, IT_FONT_SIZES } from "../lib/cards";
 import { chipCls, btnCls, sectionLabelCls } from "../ui";
@@ -67,9 +69,13 @@ export default function ImageTextPage() {
     itRatio, itCards, itLoading, itError, itNote, itCopied,
     itImportDraft, itSplit, itExportAll, itCopyText,
     itMode, setItMode, itTopic, setItTopic, itRefNote, setItRefNote, itGenerate,
+    itRefLoading, itFetchRefNote,
     itTitles, itTitlesLoading, itGenTitles, itPickTitle,
     itCaption, itCaptionLoading, itCaptionCopied, itGenCaption, itCopyCaption,
+    webOn, webReady, refPlan, refsLoading,
   } = useApp();
+  const nav = useNavigate();
+  const [refLink, setRefLink] = useState(""); // 参考爆款笔记的链接(抓正文填进下面的输入框)
 
   return (
     <main className="mx-auto box-border grid w-full max-w-[1440px] min-h-0 flex-1 grid-cols-[320px_1fr] gap-8 px-7 pt-6 pb-7">
@@ -110,9 +116,38 @@ export default function ImageTextPage() {
               <textarea value={itTopic} onChange={e => setItTopic(e.target.value)}
                 placeholder={"想做什么主题的图文?比如:\n「租房避坑的8条经验」「新手健身一周计划」"} rows={3}
                 className="box-border w-full resize-y rounded-md border border-line bg-white px-3 py-2.5 font-sans text-[13px] leading-[1.8] text-ink" />
+              {/* 参考笔记通常就是浏览器里开着的那一篇,给个链接比"全选复制再粘回来"顺手 */}
+              <div className="mt-2 flex gap-1.5">
+                <input value={refLink} onChange={e => setRefLink(e.target.value)}
+                  onKeyDown={async e => { if (e.key === "Enter" && await itFetchRefNote(refLink)) setRefLink(""); }}
+                  placeholder="参考笔记的链接(可选,抓正文填到下面)" spellCheck={false}
+                  className="min-w-0 flex-1 rounded-md border border-dashed border-line bg-white px-2.5 py-1.5 font-sans text-xs text-ink placeholder:text-ink-faint" />
+                <button onClick={async () => { if (await itFetchRefNote(refLink)) setRefLink(""); }}
+                  disabled={itRefLoading || !refLink.trim()}
+                  className={btnCls + " shrink-0 rounded-md px-2.5 text-xs"}>
+                  {itRefLoading ? "抓取中…" : "抓取"}
+                </button>
+              </div>
               <textarea value={itRefNote} onChange={e => setItRefNote(e.target.value)}
                 placeholder="(可选)粘贴一篇参考爆款笔记,AI 只仿它的结构和写法,不抄内容" rows={4}
-                className="mt-2 box-border w-full resize-y rounded-md border border-dashed border-line bg-white px-3 py-2.5 font-sans text-xs leading-[1.8] text-ink placeholder:text-ink-faint" />
+                className="mt-1.5 box-border w-full resize-y rounded-md border border-dashed border-line bg-white px-3 py-2.5 font-sans text-xs leading-[1.8] text-ink placeholder:text-ink-faint" />
+
+              {/* 联网状态:主题直出是最需要真实素材的场景,得让用户知道这次带没带资料 */}
+              <div className="mt-2 text-[11px] leading-relaxed text-ink-faint">
+                {webOn
+                  ? (refPlan.used.length > 0
+                    ? `联网写作已开启 · ${refPlan.used.length} 条资料会作为事实依据带上`
+                    : "联网写作已开启 · 生成前会先按主题查一次资料")
+                  : (
+                    <>
+                      联网写作未开启,内容全凭模型自身知识。
+                      <button onClick={() => nav("/settings")}
+                        className="ml-1 cursor-pointer border-none bg-transparent p-0 text-[11px] text-indigo underline">
+                        {webReady ? "去开启" : "去配置"}
+                      </button>
+                    </>
+                  )}
+              </div>
             </>
           )}
         </section>
@@ -181,7 +216,9 @@ export default function ImageTextPage() {
               className="cursor-pointer rounded-lg border-none bg-indigo py-[11px] text-sm font-semibold tracking-[2px] text-white
                 disabled:cursor-default disabled:opacity-50
                 focus-visible:outline-2 focus-visible:outline-indigo focus-visible:outline-offset-2">
-              {itLoading ? "生成中…" : (itRefNote.trim() ? "AI 仿写生成图文" : "AI 生成图文卡片")}
+              {itLoading
+                ? (refsLoading === "search" ? "查资料中…" : "生成中…")
+                : (itRefNote.trim() ? "AI 仿写生成图文" : "AI 生成图文卡片")}
             </button>
           )}
           {itError && <div className="text-xs text-seal">{itError}</div>}

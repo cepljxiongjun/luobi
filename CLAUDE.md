@@ -22,6 +22,9 @@ src/
     SelectionToolbar.jsx# 选中正文后浮在选区上方的 AI 工具条
     ContextMenu.jsx     # 正文右键菜单(全部操作 + 自定义指令 + 复制选中 + 撤销)
     AcceptBar.jsx       # 局部改写完成后的「保留 / 撤销」条
+    RefsPanel.jsx       # 联网资料面板(检索/贴链接抓正文/逐条勾选/插入参考来源)
+    HotBoard.jsx        # 全网热榜面板(选题灵感 Fold 内,免 Key,挂载即拉取)
+    ActivityOrb.jsx     # 右下角悬浮过程指示器(思考中/联网中/抓取中 + 点开看完整提示词)
   pages/
     WritePage.jsx       # 写作页(平台/语气/技能 + 编辑器,保存/导出 .md)
     ImageTextPage.jsx   # 图文生成页(拆卡 + 卡片预览/导出)
@@ -30,6 +33,9 @@ src/
     SkillsPage.jsx      # 技能库页(编写/作用域勾选/导入导出)
   lib/
     api.js              # MODELS / buildEndpoint / proxyFetch / callAI
+    websearch.js        # 联网:4 家搜索源归一化 + Jina Reader 抓正文 + 资料注入预算
+    hotboard.js         # 全网热榜:公开聚合接口 + 白名单榜单归一化(免 Key)
+    diff.js             # 版本对比:句级 LCS diff(纯函数,前后缀掐除 + 超长防线)
     presets.js          # PLATFORMS / TONES / QUICK_ACTIONS / INLINE_ACTIONS / customAction
     textareaRect.js     # 镜像 div 量 textarea 选区坐标(浮条定位 + 选区高亮的地基)
     mdfile.js           # 文章 ↔ 单个 .md 的互转(frontmatter 序列化/容错解析/文件名规则)
@@ -63,7 +69,10 @@ src/
      - **持久化走独立键**(`luobi-skills-v1` / store 的 `skills` 键,不进 settings 快照——settings 是防抖全量写,技能几十 KB 混进去等于每敲一个 Key 字符就重新序列化整包)。内置**只存偏差**:没碰过的自动拿新版、只开关过的保留开关拿新版、编辑过的保留用户版本并标「已修改」(可还原)、删过的立墓碑不复活(可恢复)
      - **点名调用**(对应 Manual 档):右键菜单「⚡ 用技能改写…」,`skillAction(skill)` 的 op 是 `manual`,所以自动技能块为空——点名就只用这一条
    - **AI 操作撤销**:每次 AI 修改正文前 `pushHistory()` 压栈(上限 10,含 docTitle),操作条「↩ 撤销」回退;手动输入不入栈
+   - **历史版本 + 版本对比**(2026-08):`pushHistory(label)` 在压撤销栈的同时挂一份**持久快照**(上限 20,内容没变不堆版本;label 记触发场景如「换种写法前」)。与撤销栈是两层:撤销是"刚才那步反悔"(10 步,刷新即失),快照是"改废了想回三天前那版"(落盘,`drafts` 表 `history` 行 / `luobi-draft-history-v1`)。左栏「历史版本」Fold 列快照(+手动「存一版」,**只进快照不进撤销栈**——压一份一模一样的内容会让下一次 ↩ 看起来没反应);「对比」在右栏出**句级红线稿**(`lib/diff.js`:LCS,按句号/换行切段,分隔符留句尾保证 join 逐字复原;先掐公共前后缀,中段超 4M 格退化成整块删/加不卡死页面),删除线 = 那版有现在删了、靛蓝 = 现在新增;「恢复此版本」前自动把当前内容留档,恢复本身可撤销
    - **键盘快捷键**:`Ctrl/Cmd+S` 保存、`Esc` 逐层关闭(菜单 > 浮条 > 接受条)、`Ctrl/Cmd+Z` **只在接受条还在时**劫持为撤销 AI 改写,其余时刻放行给输入框原生撤销(否则手打的字就撤不了了)
+   - **选题灵感**(对标易撰热点选题,2026-08):左栏「选题灵感」Fold,输入领域词 → 用已配置的搜索源按**固定一周时效**检索当下讨论(选题要的就是"现在在聊什么",不跟全局时效设置)→ `runJson` 提炼成 5-8 张选题卡(标题/切入角度/为什么现在写),点卡片把「标题 —— 角度」填进主题框。**检索结果不进 refs 面板**(选题素材≠写作资料);**结果不随草稿持久化**(热点过夜就馊);未配搜索源显示引导。op 是 `inspire` 但**不进 skills.js 的 OPS**——选题不需要注入写作技能,`runJson` 的 label 参数就是为这种场景留的
+     - **全网热榜**(`lib/hotboard.js` + `components/HotBoard.jsx`):同一 Fold 内置微博/知乎/头条/百度/抖音/B站六榜,一次请求拿回(公开聚合接口 `api.vvhan.com/api/hotlist/all`,**免 Key**——「不做内置搜索」那条红线针对的是按次计费服务,免费公共接口与 Jina 免 Key 档同一性质)。点条目填进主题框,悬停出「⌕ 角度」(把该热点喂给选题灵感)与「↗ 原文」。**Fold 展开才渲染 children,所以子组件挂载即拉取 = 展开即刷新**;10 分钟缓存,互斥与缓存判断走 ref 而非 state(StrictMode 双跑挂载 effect,state 拦不住同帧并发的第二发)。榜单白名单按关键词匹配(接口的榜名偶有变化),脏 URL 清空、每榜留 15 条
    - **发布前检查**(对标零克查词,竞品单独收费的品类):AI 按当前平台查违禁词/极限词风险、错别字病句、存疑表述,返回 JSON(安全分/总评/issues),渲染成报告面板;每条可一键「应用」建议(替换首个匹配,可撤销)或「忽略」;正文再修改后报告标脏提示重查;检查不遮挡编辑器(loading === "check" 不出全屏遮罩)
    - **大纲先行**(对标光速写作):模型行「先列大纲」→ AI 出 4-6 个小节(JSON),渲染成可编辑面板(改标题/改说明/上下调序/增删/清空)→「按大纲成文」按确认后的结构成文;大纲状态在 store 的 `outline`
    - 调研留档:`docs/产品调研-2026-07.md`
@@ -84,7 +93,32 @@ src/
    - 4 款模板主题(宣纸墨/靛蓝夜/暖米/青瓷)、画幅 3:4(小红书首选)与 1:1、字号三档、卡片署名
    - 预览:封面卡(大标题+亮点标签)+ 内容页卡(小标题+要点+页码);DOM 预览与 canvas 导出同构
    - 导出:`drawCardCanvas` 纯 canvas 绘制(无 html2canvas 依赖),单张/全部下载 1080×1440(或 1080×1080)PNG;复制全部文案
-3. **模型设置页** `/settings`:接入方式(内置/自定义)、内置模型单选、自定义接入表单(API 格式/Host/Key/模型名),修改即时生效并自动保存本机;写作页模型下拉保留快速切换,「自定义接入…」跳转设置页
+3. **联网**(`lib/websearch.js` + 设置页「联网搜索」区块 + 写作页左栏「联网资料」Fold):
+   - **不做「内置免配置搜索」**:搜索按次计费,内置等于我替用户付钱,也与模型层「用户自带 Key」的范式不一致。没配 Key 时联网整体不可用,而**不是偷偷降级成不联网**——那会让用户以为稿子里的数据是查过的
+   - **4 家搜索源,一张表搞定**:调研结论是面向 LLM 的搜索 API 已高度同构(POST JSON + 一个 Key 头 + 一个结果数组),所以只写「请求怎么拼 / 响应怎么读」的 builder 表 + 一层归一化,不做插件框架
+     - 博查 `api.bochaai.com/v1/web-search`(中文最好,响应沿用 Bing 结构 `data.webPages.value`;**HTTP 200 里用 body.code 表业务错误**,不看这层会把报错当成零结果)
+     - 智谱 `open.bigmodel.cn/api/paas/v4/web_search`(`search_engine: search_std`,已在用 GLM 的人不必再申请第二个 Key)
+     - Tavily `api.tavily.com/search`(英文强,每月 1000 次免费)/ Serper `google.serper.dev/search`(Google 结果,头名是 `X-API-KEY` 不是 Bearer)
+     - 归一化成 `{title, url, snippet, site, date}`,上层只认这个形状,换源不改任何调用点。时效档位直接借用博查/智谱的词表(两家逐字相同),Tavily(`time_range: day/week/…`)与 Serper(`tbs: qdr:*`)在各自 builder 里翻译;**不限时必须整个字段不出现**而不是传 null
+   - **网页正文抓取用 Jina Reader**(`r.jina.ai/<url>`,`Accept: application/json`):免 Key 可用(20 次/分钟),填 Key 到 200 次/分钟。不自己解析 HTML——正文抽取是专门问题,且浏览器端根本抓不到别人的页面(CORS),自己做等于只有桌面端能用
+   - **注入预算** `REF_BUDGET=8000` / `REF_MAX=8` / 单条正文 `REF_TEXT_MAX=4000`:与技能同一范式,**整条要么全进要么全不进**(半条资料会让模型拿着残缺的数字往下写,比不给更危险);单条自己就超预算时仍让它生效。被裁的在面板上标「超预算未注入」
+   - **写作与审稿是两套相反的规则**(`REF_RULES`):写作时资料是素材(别照搬、别硬用、资料里没有的别写成有出处),审稿时资料是标尺(逐条比对、冲突报成 `type:"fact"`、**不要因为资料里有新信息就建议往正文里加内容**)。`refsFor(op)` 按 op 选版本
+   - **只给「要产出新内容」的操作注入** `REF_OPS = draft/outline/expand/continue/custom/cards/caption/check`:换写法/精简/润色/起标题面对的是已经写好的正文,塞外部资料只会诱导模型加原文没有的东西
+   - **`refs` 的权威副本放在 `refsRef` 里**:自动检索完紧接着就要拼提示词,而 `setRefs` 触发的重渲染不保证发生在 `await` 之后那行代码之前(与局部改写「不能改完再读 `content`」同源)。所有改动走 `putRefs`,state 与镜像同时更新
+   - **资料必须可见、可否决**:面板逐条列出标题/摘要/站点/日期,可勾选、可删、可点开原文、可「抓正文」把摘要换成整篇。把这一层藏起来的联网功能,与让模型自由编造没有本质区别
+   - 检索**追加**而不是替换(一个选题常要换几个关键词各搜一次);已有资料时「落笔」不再自动检索(那是用户挑过的);**检索失败不阻断写作**,只留错误提示——联网是增强不是前置条件
+   - 「插入参考来源」把勾选的来源作为清单追加到正文末尾,**不自动加**:知乎需要、小红书绝不需要,这个判断只有用户能下
+   - `openExternal` 打开原文链接:桌面端 WebView 吞掉 `target="_blank"`,必须走 opener 插件。capabilities 加的是 `opener:allow-open-url` + `opener:allow-default-urls`(只放行 http/https/mailto/tel),**不含 `open-path`**,所以这条通道打不开本地文件
+   - Vite 代理的转发头白名单加了 `accept`(Jina 要它才返回结构化正文);Serper 的 `X-API-KEY` 与 Claude 格式头名恰好一致,不用另加
+4. **过程可见**(`components/ActivityOrb.jsx` + store 的 `trace`):右下角常驻悬浮球,AI 在忙时显示「思考中 / 联网中 / 抓取中」+ 当前这一步在做什么,点开是最近 30 步的过程面板
+   - **每一步都能展开看原样的请求**:模型步给出「注入了哪几条技能 / 几条资料」的结论,再给系统提示词全文、这次的指令、模型返回;检索步给出搜索源与命中列表(可点开原文);抓取步给出 URL 与抓到的字数
+   - 与「联网资料可见可否决」是同一个立场的两半:**模型给的是结果,过程全在暗处**。用户想知道「这段数字哪来的」「为什么这次写得不像我要的」,唯一的答案在提示词里
+   - **留痕点收在两个包装函数里**:正文类走 `runProse`,要 JSON 的走 `runJson(op, prompt, system, platformId?, label?)`——所以 store 里不再有裸的 `callAI` 调用,新增功能只要走这两个入口就自动留痕
+   - `system` 在 `runProse` 里**只拼一次**:它同时要发给模型和记进面板,拼两次会出现"面板里显示的与实际发出去的不是同一份"这种最难查的偏差
+   - `traceRef` 与 `refsRef` 同源:一步的开始与结束之间跨了 `await`,读 state 会读到旧的
+   - **设置页的两个「测试连接」故意不留痕**:面板记的是「为了写这篇稿子做了什么」,不是网络活动日志;它们的结果本来就显示在按钮旁边
+   - 面板里不含任何 Key(系统提示词与指令里本来就没有),只留最近 30 步,刷新即清空
+5. **模型设置页** `/settings`:接入方式(内置/自定义)、内置模型单选、自定义接入表单(API 格式/Host/Key/模型名),修改即时生效并自动保存本机;写作页模型下拉保留快速切换,「自定义接入…」跳转设置页
    - Claude 格式 `/v1/messages`(x-api-key 头)/ OpenAI 兼容 `/v1/chat/completions`(Bearer 头),可接 One-API、DeepSeek、智谱、Ollama、vLLM 等
    - `buildEndpoint` 兼容各种 Host 写法:裸域名、带 `/v1`(DeepSeek)、带 `/api/paas/v4`(智谱)、完整端点,自动归一化,不会拼出 `/v1/v1/...`
    - **常用服务预设**(chips 一键填 Host+格式+提示):Ollama `localhost:11434` / vLLM `localhost:8000` / LM Studio `localhost:1234` / DeepSeek / 智谱 GLM
@@ -134,15 +168,20 @@ src/
 - **数据存储**(`src/lib/storage.js` 分发 + `src/lib/db.js` SQLite 后端):
   - **设置与技能**:桌面端存 SQLite(`%APPDATA%/com.luobi.app/luobi.db`,表见 `src-tauri/src/lib.rs` 的 `migrations()`);浏览器存 localStorage(`luobi-settings-v1` / `luobi-skills-v1`)。**浏览器不上 SQLite**——拖 wasm 进来要几 MB,为几十 KB 数据不值,且与「文章存储路径仅桌面端」是同一范式
   - **设置按行存**(一个键一行)而不是整包 JSON,这是换库唯一的实质收益:改一个字段只写一行,不必整包重新序列化
-  - **三张表 settings / skills / articles,一个引擎**。`tauri-plugin-store` 已退出写入路径,只剩「SQLite 探不通时的降级出口」和「一次性迁移来源」两个职责;确认没有用户停在旧版本后可以整个摘掉
+  - **四张表 settings / skills / articles / drafts,一个引擎**。`tauri-plugin-store` 已退出写入路径,只剩「SQLite 探不通时的降级出口」和「一次性迁移来源」两个职责;确认没有用户停在旧版本后可以整个摘掉
   - **articles 表只是「没选自选文件夹时」的兜底**。选了文件夹,文章就只是那一堆 `.md`,这张表根本不会被写——事实来源永远是能被 Obsidian 打开的文件
   - **刻意不建 FTS5 索引**:实测 800 篇 / 1MB 中文语料,trigram 索引与普通表全扫都是 1-2ms(5 字查询下 FTS5 反而更慢,查询计划显示它在 `SCAN VIRTUAL TABLE` 而不是 seek)。**而且 FTS5 的默认分词器对中文完全失效**(整串汉字是一个 token,搜「写作」零命中),trigram + `MATCH` 也要 ≥3 字才命中,只有 trigram + `LIKE` 才对——这套坑不值得为一个 2ms 的操作去踩。文章本来就全量在内存里,搜索用 JS 过滤零 I/O 且浏览器端同样生效
   - **写入一律 upsert + prune,绝不先 DELETE 全表**:tauri-plugin-sql 每次 execute 可能拿到连接池里不同的连接,`BEGIN`/`COMMIT` 跨不了语句所以拿不到真事务。先清空的话中途失败(磁盘满/进程被杀)数据就全没了;upsert + prune 的最坏情况只是多留几行陈旧数据,表永远不为空
   - **设置的按键写靠模块级 `lastWritten` 快照做 diff**:store 传下来的永远是整包快照,不比一下就不知道谁变了。**`loadSettingsDb` 读到空表时必须把 `lastWritten` 清成 null**——不清的话首次迁移会被 diff 判成「什么都没变」,一行都不写(踩过的坑,有回归用例)
   - **⚠️ `articlesDir` 的读取方必须跟着搬**:`lib.rs` 启动时要读它给 fs 运行时 scope 补授权,设置搬进 SQLite 后那里也必须从 SQLite 读——继续读 `settings.json` 会拿到空值,症状是「重启一次文章全没了」。Rust 侧用 `SqliteConnectOptions::filename()` 直接吃 PathBuf,**不要拼 `sqlite:{path}` URL**(Windows 路径的反斜杠和盘符冒号在 URL 解析里不可靠)。值是 JSON 编码的,要 `serde_json::from_str::<String>` 剥一层
   - **迁移永不破坏性**:首次进 SQLite 时从 `settings.json` 一次性搬入,旧 JSON 一个字都不删,留着当安全网;SQLite 探不通则整体退回旧后端。迁移记的是 promise 不是布尔——设置与技能两条水合链会并行触发,记布尔的话第二个调用方会读到空表
-- 文章与技能库均已持久化;未保存的草稿、标题候选、图文卡片仍只在内存,刷新即失
-- API Key 明文存本机(localStorage / settings.json);桌面端后续可迁系统钥匙串
+- **草稿全量持久化**(2026-08):写作页(主题/标题/正文/标题候选/大纲/平台/语气/`currentArticleId`)、联网资料(检索词 + 逐条含勾选态与抓到的正文)、图文页(模式/源文/主题/参考笔记/卡片/文案)防抖 800ms 落盘,刷新/重启不丢
+  - 桌面端存 **drafts 独立表**(migration v3,单行 `id='current'` JSON);浏览器 `luobi-draft-v1`。**不能塞进 settings 表**:`loadSettingsDb` 把整表读进 diff 快照,草稿键不在设置快照里,下一次保存设置的 prune 会把它删掉(有回归钉子)
+  - 恢复排在文章库读完之后(`currentArticleId` 要对着实际存在的文章校验);每个字段过防线(平台/语气查表、`itCards` 过 `normalizeCards`、refs 截断上限);**refs 恢复必须走 `putRefs`**(refsRef 镜像要同步);门闩 `draftReady` 防默认值覆盖
+  - **trace(AI 过程)与选题灵感刻意不持久化**:前者是会话性日志,后者是热点、过夜就馊
+- 仍只在内存的:AI 过程面板、选题灵感结果(见上,刻意如此)
+- API Key 明文存本机(localStorage / SQLite);**搜索 Key 与 Jina Key 同样如此**;桌面端后续可迁系统钥匙串
+- **浏览器生产构建直连搜索服务需要对方允许跨域**(与模型调用同一处境):开发模式经 Vite 代理转发不受影响,桌面端走原生请求无此限制
 
 ## 设计规范(改 UI 时必须遵守)
 
@@ -154,11 +193,11 @@ src/
 
 ## 建议的下一步(按优先级)
 
-1. 持久化收尾:草稿(设置/文章/技能已做完;Key 可进系统钥匙串)
-2. 历史草稿列表 + 版本对比
-3. 流式输出(SSE):两种协议格式都支持 stream,提升生成体验
-4. 双模型对比生成(同一主题左右两栏出稿)
-5. 桌面端技能文件夹监听(放入即生效)
+1. 持久化收尾:Key 进系统钥匙串(草稿/资料/快照/设置/文章/技能均已落盘)
+2. 双模型对比生成(同一主题左右两栏出稿)
+3. 桌面端技能文件夹监听(放入即生效)
+4. 联网:多轮检索(模型读完第一批资料后自己提出下一个查询)
+5. 热榜聚合接口的备用源(当前单一公共接口,挂了只报错;可加第二家做自动切换)
 
 ## Git 工作流
 
@@ -184,8 +223,12 @@ ui: 左栏低频设置折叠,默认一屏放下
 
 ## CI / 发布(GitHub Actions)
 
-- `.github/workflows/ci.yml`:推送到 main/master 或提 PR 时,验证网页构建(ubuntu)+ 桌面端 `cargo check`(windows)
-- `.github/workflows/release.yml`:推送 `v*` tag(如 `v0.1.0`)时,自动打包 Windows 安装程序并创建 GitHub Release 草稿(tauri-action)
+- `.github/workflows/ci.yml`:推送到 main/master 或提 PR 时,验证网页构建(ubuntu)+ 桌面端 `cargo check`(**windows 与 macos 各一遍**)
+- `.github/workflows/release.yml`:推送 `v*` tag(如 `v0.1.0`)时,**并行打 Windows 与 macOS 两个包**并写进同一个 GitHub Release 草稿(tauri-action)
+  - macOS 出的是 **universal 通用二进制**(`--target universal-apple-darwin`,需要先 `rustup target add` 两个架构,workflow 里由 `dtolnay/rust-toolchain` 的 `targets` 负责)。体积大一点,换掉「我该下哪个」这个必然有人问错的问题
+  - `fail-fast: false`:一个平台挂了另一个照样出包
+  - **没有 Apple 开发者签名**,所以 macOS 首次打开会提示「已损坏,无法打开」。Release 正文里写了绕过办法:`xattr -dr com.apple.quarantine /Applications/落笔.app`。要根治得买 99 美元/年的开发者账号并配公证(notarization),那是发布策略问题不是代码问题
+  - 两个 job 会先后写同一个 Release,所以 `releaseBody` 写成平台无关的,谁先跑完都一样
 - 发布流程:改 `package.json` 与 `src-tauri/tauri.conf.json` 里的版本号 → 提交 → `git tag v0.1.0 && git push --tags` → 到 GitHub Releases 页把草稿发布
 
 ## 常用命令
@@ -195,5 +238,9 @@ npm install          # 首次安装依赖
 npm run dev          # 网页开发 http://localhost:5173
 npm run build        # 网页生产构建
 npm run tauri dev    # 桌面端开发
-npm run tauri build  # 桌面端打包安装程序
+npm run tauri build  # 桌面端打包安装程序(当前平台)
+
+# macOS 上打通用包(Apple 芯片 + Intel 一个 .dmg 通吃)
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+npm run tauri build -- --target universal-apple-darwin
 ```

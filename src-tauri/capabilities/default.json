@@ -29,6 +29,8 @@
     "fs:allow-stat",
 
     "opener:allow-reveal-item-in-dir",
+    "opener:allow-open-url",
+    "opener:allow-default-urls",
 
     "sql:default",
     "sql:allow-execute"

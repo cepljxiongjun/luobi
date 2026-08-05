@@ -1,7 +1,8 @@
 import { isTauri } from "./api";
 import {
   dbAvailable, loadSettingsDb, saveSettingsDb, loadSkillsDb, saveSkillsDb,
-  loadArticlesDb, saveArticlesDb, migrateFromStore,
+  loadArticlesDb, saveArticlesDb, loadDraftDb, saveDraftDb,
+  loadSnapsDb, saveSnapsDb, migrateFromStore,
 } from "./db";
 
 // ============ 持久化:按运行环境选后端 ============
@@ -20,6 +21,8 @@ const ARTICLES_LS_KEY = "luobi-articles-v1";
 const ARTICLES_KEY = "articles";
 const SKILLS_LS_KEY = "luobi-skills-v1";
 const SKILLS_KEY = "skills";
+const DRAFT_LS_KEY = "luobi-draft-v1";
+const DRAFT_KEY = "draft";
 
 let tauriStorePromise = null;
 function getTauriStore() {
@@ -117,6 +120,41 @@ export async function saveSkills(obj) {
     if (await dbAvailable()) { await saveSkillsDb(obj); return; }
   } catch { /* 落到旧后端 */ }
   await writeLegacy(SKILLS_KEY, SKILLS_LS_KEY, obj);
+}
+
+// ---- 草稿:未保存的工作状态(正文/标题候选/大纲/联网资料/图文卡片) ----
+// 没有历史数据,所以不走 migrateOnce;SQLite 探不通就退回旧后端,与其它键同一姿势
+
+export async function loadDraft() {
+  try {
+    if (await dbAvailable()) return await loadDraftDb();
+  } catch { /* 落到旧后端 */ }
+  return readLegacy(DRAFT_KEY, DRAFT_LS_KEY, null);
+}
+
+export async function saveDraft(obj) {
+  try {
+    if (await dbAvailable()) { await saveDraftDb(obj); return; }
+  } catch { /* 落到旧后端 */ }
+  await writeLegacy(DRAFT_KEY, DRAFT_LS_KEY, obj);
+}
+
+// ---- 历史快照(版本对比):与草稿同一姿势 ----
+const SNAPS_LS_KEY = "luobi-draft-history-v1";
+const SNAPS_KEY = "draftHistory";
+
+export async function loadSnaps() {
+  try {
+    if (await dbAvailable()) return await loadSnapsDb();
+  } catch { /* 落到旧后端 */ }
+  return readLegacy(SNAPS_KEY, SNAPS_LS_KEY, null);
+}
+
+export async function saveSnaps(obj) {
+  try {
+    if (await dbAvailable()) { await saveSnapsDb(obj); return; }
+  } catch { /* 落到旧后端 */ }
+  await writeLegacy(SNAPS_KEY, SNAPS_LS_KEY, obj);
 }
 
 // ---- 文章:内部存储兜底(自选了文件夹时走 articlesFs.js,根本不经过这里) ----
