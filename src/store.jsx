@@ -3,7 +3,7 @@ import { MODELS, callAI, callAIStream, isTauri } from "./lib/api";
 import { PLATFORMS, TONES } from "./lib/presets";
 import { parseSkillFile, selectSkills, renderSkillsBlock, skillAction,
   unpackSkills, packSkills, hasDeletedBuiltins, normalizeSkill,
-  serializeSkill, SKILL_COUNT_MAX, BUILTIN_SKILLS } from "./lib/skills";
+  serializeSkill, SKILL_COUNT_MAX, BUILTIN_SKILLS, OPS } from "./lib/skills";
 import { IT_THEMES, IT_RATIOS, IT_FONT_SIZES, localSplitCards, normalizeCards, drawCardCanvas } from "./lib/cards";
 import { SEARCH_PROVIDERS, SEARCH_FRESHNESS, searchConfigured, webSearch, readUrl,
   selectRefs, renderRefsBlock, renderSourceList, REF_TEXT_MAX } from "./lib/websearch";
@@ -48,6 +48,13 @@ export function AppProvider({ children }) {
   const [refsLoading, setRefsLoading] = useState("");         // "" | "search" | "read" | ref.id
   const [refsError, setRefsError] = useState("");
   const [refsQuery, setRefsQuery] = useState("");             // 最近一次检索用的关键词,面板上显示
+
+  // ---- 过程留痕:每次联网检索 / 网页抓取 / 模型调用都记一条 ----
+  // 存在的理由与「资料可见可否决」同源:AI 写作最大的信任问题是"它到底拿什么写的"。
+  // 稿子本身看不出这个,只有把发出去的提示词原样摆出来才看得出
+  const [trace, setTrace] = useState([]);
+  const traceRef = useRef([]);   // 同 refsRef:开始与结束之间会跨 await,读 state 会读到旧的
+  const traceSeq = useRef(0);
 
   // ---- 写作技能 ----
   // 初值先给内置(带默认启用),水合完成后再换成合并了用户偏差的版本
@@ -348,6 +355,52 @@ export function AppProvider({ children }) {
     `你是一位资深自媒体写作者。写作平台:${platform.prompt} 语气风格:${tone.name}(${tone.desc})。`
     + skillsFor(op) + refsFor(op);
 
+  // ---- 过程留痕:动作 ----
+  const TRACE_MAX = 30; // 只留最近这么多步,过程面板不是日志系统
+
+  const traceStart = (kind, label, detail = {}) => {
+    const id = `s-${++traceSeq.current}`;
+    const next = [...traceRef.current, { id, kind, label, detail, status: "running", at: Date.now(), ms: 0 }];
+    traceRef.current = next.slice(-TRACE_MAX);
+    setTrace(traceRef.current);
+    return id;
+  };
+
+  const traceEnd = (id, patch = {}) => {
+    const next = traceRef.current.map(s => s.id === id
+      ? { ...s, detail: { ...s.detail, ...(patch.detail || {}) },
+          error: patch.error, status: patch.error ? "failed" : "done", ms: Date.now() - s.at }
+      : s);
+    traceRef.current = next;
+    setTrace(next);
+  };
+
+  const clearTrace = () => { traceRef.current = []; setTrace([]); };
+
+  // 悬浮球显示的当前活动:同一时刻只可能有一个(所有入口都被 loading 态互斥)
+  const activity = trace.find(s => s.status === "running") || null;
+
+  // 一次模型调用的留痕。system 已经拼好了(技能与资料都在里面),这里额外把
+  // "注入了哪几条"单列出来——面板里读一整段提示词太费劲,先给结论再给全文
+  const traceModel = (op, prompt, system, platformId = platform.id, label) => traceStart(
+    "model", label || OPS[op] || op,
+    {
+      system, user: prompt, model: activeModel, op,
+      skills: selectSkills(skills, { op, platformId }).used.map(s => s.name),
+      refs: (webOn && REF_OPS.includes(op)) ? selectRefs(refsRef.current).used.map(r => r.title) : [],
+    },
+  );
+
+  // 非正文类(要 JSON 的)模型调用统一从这里走,好让过程面板也记上一笔
+  const runJson = async (op, prompt, system, platformId = platform.id, label) => {
+    const id = traceModel(op, prompt, system, platformId, label);
+    try {
+      const text = await callAI(prompt, system, apiConfig());
+      traceEnd(id, { detail: { result: text } });
+      return text;
+    } catch (e) { traceEnd(id, { error: e.message || "调用失败" }); throw e; }
+  };
+
   // ---- 联网:动作 ----
   const REF_LIST_MAX = 30; // 面板里最多留这么多条,再多用户自己也管不过来
 
@@ -358,6 +411,9 @@ export function AppProvider({ children }) {
     if (!q) { setRefsError("先写下要查什么"); return 0; }
     if (!webReady) { setRefsError("还没有配置联网搜索:请到设置页选择搜索源并填入 Key"); return 0; }
     setRefsError(""); setRefsLoading("search");
+    const t = traceStart("web", `检索「${q}」`, {
+      query: q, provider: searchProvider, freshness: searchFreshness, count: searchCount,
+    });
     try {
       const list = await webSearch(q, searchCfg());
       const stamped = list.map((r, i) => ({
@@ -366,8 +422,9 @@ export function AppProvider({ children }) {
       const seen = new Set(refsRef.current.map(r => r.url));
       putRefs([...refsRef.current, ...stamped.filter(r => !seen.has(r.url))].slice(0, REF_LIST_MAX));
       setRefsQuery(q);
+      traceEnd(t, { detail: { results: list } });
       return list.length;
-    } catch (e) { setRefsError(e.message || "检索失败,请重试"); return 0; }
+    } catch (e) { traceEnd(t, { error: e.message }); setRefsError(e.message || "检索失败,请重试"); return 0; }
     finally { setRefsLoading(""); }
   };
 
@@ -377,15 +434,17 @@ export function AppProvider({ children }) {
     const link = String(u || "").trim();
     if (!link) return false;
     setRefsError(""); setRefsLoading("read");
+    const t = traceStart("read", "抓取网页正文", { url: link });
     try {
       const page = await readUrl(link, searchCfg());
+      traceEnd(t, { detail: { title: page.title, chars: page.text.length, text: page.text } });
       if (refsRef.current.some(r => r.url === page.url)) { setRefsError("这条链接已经在资料里了"); return false; }
       putRefs([...refsRef.current, {
         id: `r-${Date.now()}`, title: page.title, url: page.url, site: page.site, date: page.date,
         snippet: page.text.slice(0, 300), text: page.text, picked: true, from: "url",
       }].slice(0, REF_LIST_MAX));
       return true;
-    } catch (e) { setRefsError(e.message || "抓取失败,请重试"); return false; }
+    } catch (e) { traceEnd(t, { error: e.message }); setRefsError(e.message || "抓取失败,请重试"); return false; }
     finally { setRefsLoading(""); }
   };
 
@@ -395,11 +454,13 @@ export function AppProvider({ children }) {
     const r = refsRef.current.find(x => x.id === id);
     if (!r || r.text) return;
     setRefsError(""); setRefsLoading(id);
+    const t = traceStart("read", "抓取网页正文", { url: r.url });
     try {
       const page = await readUrl(r.url, searchCfg());
+      traceEnd(t, { detail: { title: page.title, chars: page.text.length, text: page.text } });
       putRefs(refsRef.current.map(x => x.id === id
         ? { ...x, text: page.text.slice(0, REF_TEXT_MAX), title: x.title || page.title } : x));
-    } catch (e) { setRefsError(e.message || "抓取失败,请重试"); }
+    } catch (e) { traceEnd(t, { error: e.message }); setRefsError(e.message || "抓取失败,请重试"); }
     finally { setRefsLoading(""); }
   };
 
@@ -604,14 +665,16 @@ export function AppProvider({ children }) {
   // 正文类生成的统一入口:开启流式时边收边写进编辑器,否则一次性写入
   // apply(文本) 由调用方决定怎么落到正文(整篇替换 / 拼回选区 / 追加到末尾)
   const runProse = async (prompt, apply, op = "draft") => {
-    if (streamEnabled) {
-      const text = await callAIStream(prompt, baseHint(op), apiConfig(), apply);
+    const system = baseHint(op); // 只拼一次:它同时要发给模型和记进过程面板
+    const id = traceModel(op, prompt, system);
+    try {
+      const text = streamEnabled
+        ? await callAIStream(prompt, system, apiConfig(), apply)
+        : await callAI(prompt, system, apiConfig());
       apply(text); // 收尾用 trim 过的最终结果覆盖一次
+      traceEnd(id, { detail: { result: text } });
       return text;
-    }
-    const text = await callAI(prompt, baseHint(op), apiConfig());
-    apply(text);
-    return text;
+    } catch (e) { traceEnd(id, { error: e.message || "调用失败" }); throw e; }
   };
 
   const generate = async () => {
@@ -632,11 +695,10 @@ export function AppProvider({ children }) {
     setError(""); setLoading("outline");
     try {
       await autoRefs(topic.trim()); // 大纲最吃"这个领域现在在讨论什么",联网收益比成文还大
-      const raw = await callAI(
+      const raw = await runJson("outline",
         `请为主题「${topic.trim()}」列一份适合${platform.name}的写作大纲,4-6个小节,循序渐进、有逻辑推进,不要写正文。` +
         `只返回JSON数组,不要markdown代码块,格式:[{"heading":"小节标题,12字内","note":"这一节要写什么,25-40字"}]`,
-        baseHint("outline"), apiConfig()
-      );
+        baseHint("outline"));
       const arr = JSON.parse(raw.replace(/```json|```/g, "").trim());
       if (!Array.isArray(arr) || arr.length === 0) throw new Error("返回格式异常");
       setOutline(arr.slice(0, 8).map(x => ({
@@ -715,10 +777,9 @@ export function AppProvider({ children }) {
     setError(""); setLoading("titles");
     try {
       const src = content.trim() || `主题:${topic}`;
-      const raw = await callAI(
+      const raw = await runJson("title",
         `请为下面的内容想5个适合${platform.name}的标题,要有点击欲但不做标题党。只返回JSON数组,格式:["标题1","标题2","标题3","标题4","标题5"],不要markdown代码块。\n\n${src}`,
-        baseHint("title"), apiConfig()
-      );
+        baseHint("title"));
       const clean = raw.replace(/```json|```/g, "").trim();
       const arr = JSON.parse(clean);
       if (Array.isArray(arr)) setTitles(arr.slice(0, 5));
@@ -741,7 +802,7 @@ export function AppProvider({ children }) {
     setError(""); setLoading("check");
     const snapshot = content;
     try {
-      const raw = await callAI(
+      const raw = await runJson("check",
         `请检查下面这篇准备发布到「${platform.name}」的内容,找出:\n` +
         `1. 违禁词、广告法极限词、可能触发平台限流或审核风险的表述(type:"risk")\n` +
         `2. 错别字、病句、标点误用(type:"typo")\n` +
@@ -751,9 +812,7 @@ export function AppProvider({ children }) {
         `"excerpt":"原文中的确切片段(必须与原文逐字一致,便于定位替换)","reason":"问题说明","suggestion":"可直接替换excerpt的修改文本,无法给出时留空"}]}\n` +
         `没有问题就返回 {"score":95以上,"summary":"...","issues":[]}。\n\n${snapshot}`,
         "你是资深新媒体内容安全与文字编辑专家,熟悉广告法与各平台社区规范,判断精准、不夸大风险。"
-        + skillsFor("check") + refsFor("check"),
-        apiConfig()
-      );
+        + skillsFor("check") + refsFor("check"));
       const data = JSON.parse(raw.replace(/```json|```/g, "").trim());
       if (!data || !Array.isArray(data.issues)) throw new Error("返回格式异常");
       setCheckReport({
@@ -808,12 +867,12 @@ export function AppProvider({ children }) {
     }
     setItLoading(true);
     try {
-      const raw = await callAI(
+      const raw = await runJson("cards",
         `请把下面的文章重组成适合小红书图文笔记的卡片结构。只返回JSON,不要markdown代码块,格式:\n` +
         `{"cover":{"title":"12-20字有点击欲的主标题","tag":"4-8字亮点标签"},"pages":[{"heading":"每页小标题,8字内","points":["每页2-4条要点,每条20-40字,口语化"]}]}\n` +
         `pages 共 3-6 页,要点要提炼观点而不是照抄原文。\n\n文章:\n${itSource.trim()}`,
-        "你是资深小红书图文笔记编辑,擅长把长文提炼成分页卡片。" + skillsFor("cards", "xhs") + refsFor("cards"), apiConfig()
-      );
+        "你是资深小红书图文笔记编辑,擅长把长文提炼成分页卡片。" + skillsFor("cards", "xhs") + refsFor("cards"),
+        "xhs", "图文拆卡");
       const cards = normalizeCards(JSON.parse(raw.replace(/```json|```/g, "").trim()));
       if (!cards) throw new Error("bad shape");
       setItCards(cards); setItNote("AI 拆分完成,可切换主题与画幅");
@@ -835,13 +894,13 @@ export function AppProvider({ children }) {
       const ref = itRefNote.trim()
         ? `\n\n参考下面这篇爆款笔记的结构、节奏与表达风格(只学结构和写法,不要抄它的内容):\n${itRefNote.trim().slice(0, 2000)}`
         : "";
-      const raw = await callAI(
+      const raw = await runJson("cards",
         `请围绕主题「${itTopic.trim()}」创作一组小红书图文笔记卡片,内容要具体、有信息量、口语化有网感。` +
         `只返回JSON,不要markdown代码块,格式:\n` +
         `{"cover":{"title":"12-20字有点击欲的主标题","tag":"4-8字亮点标签"},"pages":[{"heading":"每页小标题,8字内","points":["每页2-4条要点,每条20-40字"]}]}\n` +
         `pages 共 3-6 页。${ref}`,
-        "你是资深小红书图文笔记创作者,擅长把一个主题拆解成有传播力的分页卡片。" + skillsFor("cards", "xhs") + refsFor("cards"), apiConfig()
-      );
+        "你是资深小红书图文笔记创作者,擅长把一个主题拆解成有传播力的分页卡片。" + skillsFor("cards", "xhs") + refsFor("cards"),
+        "xhs", "图文主题直出");
       const cards = normalizeCards(JSON.parse(raw.replace(/```json|```/g, "").trim()));
       if (!cards) throw new Error("返回格式异常");
       setItCards(cards);
@@ -858,12 +917,17 @@ export function AppProvider({ children }) {
     const link = String(u || "").trim();
     if (!link) return false;
     setItError(""); setItRefLoading(true);
+    const t = traceStart("read", "抓取参考笔记", { url: link });
     try {
       const page = await readUrl(link, searchCfg());
+      traceEnd(t, { detail: { title: page.title, chars: page.text.length, text: page.text } });
       setItRefNote(page.text.slice(0, 2000));
       return true;
-    } catch (e) { setItError(`抓取失败:${(e.message || "请重试").slice(0, 80)}`); return false; }
-    finally { setItRefLoading(false); }
+    } catch (e) {
+      traceEnd(t, { error: e.message });
+      setItError(`抓取失败:${(e.message || "请重试").slice(0, 80)}`);
+      return false;
+    } finally { setItRefLoading(false); }
   };
 
   // 封面标题打磨:基于已生成的卡片出 5 个候选,点击替换
@@ -872,11 +936,10 @@ export function AppProvider({ children }) {
     setItError(""); setItTitlesLoading(true);
     try {
       const src = `${itCards.cover.title}\n${itCards.pages.map(p => `${p.heading}:${p.points.join(";")}`).join("\n")}`;
-      const raw = await callAI(
+      const raw = await runJson("title",
         `根据下面这组图文卡片的内容,给封面想5个更有点击欲的小红书标题(12-20字,可带1个emoji,不做标题党)。` +
         `只返回JSON数组:["标题1","标题2","标题3","标题4","标题5"],不要markdown代码块。\n\n${src}`,
-        "你是小红书爆款标题专家。" + skillsFor("title", "xhs"), apiConfig()
-      );
+        "你是小红书爆款标题专家。" + skillsFor("title", "xhs"), "xhs", "封面标题");
       const arr = JSON.parse(raw.replace(/```json|```/g, "").trim());
       if (!Array.isArray(arr) || arr.length === 0) throw new Error("返回格式异常");
       setItTitles(arr.map(x => String(x).trim().slice(0, 30)).filter(Boolean).slice(0, 5));
@@ -895,11 +958,10 @@ export function AppProvider({ children }) {
     setItError(""); setItCaptionLoading(true);
     try {
       const src = `${itCards.cover.title}\n${itCards.pages.map(p => `${p.heading}:${p.points.join(";")}`).join("\n")}`;
-      const text = await callAI(
+      const text = await runJson("caption",
         `根据下面这组图文卡片,写一段发布时配的小红书正文文案:100-180字,口语化有网感,分2-3小段,` +
         `适度用emoji,结尾另起一行给4-6个话题标签(#开头,空格分隔)。直接输出文案本身。\n\n${src}`,
-        "你是小红书运营,擅长写高互动的笔记配文。" + skillsFor("caption", "xhs") + refsFor("caption"), apiConfig()
-      );
+        "你是小红书运营,擅长写高互动的笔记配文。" + skillsFor("caption", "xhs") + refsFor("caption"), "xhs");
       setItCaption(text);
     } catch (e) { setItError(`文案生成失败:${(e.message || "请重试").slice(0, 80)}`); }
     setItCaptionLoading(false);
@@ -963,6 +1025,8 @@ export function AppProvider({ children }) {
     // 撤销 / 发布前检查
     canUndo: history.length > 0, undoLast,
     checkReport, checkStale, runCheck, applyIssue, dismissIssue,
+    // 过程留痕
+    trace, activity, clearTrace,
     // 联网:配置 / 资料
     searchProvider, setSearchProvider, searchKey, setSearchKey,
     searchCount, setSearchCount, searchFreshness, setSearchFreshness,

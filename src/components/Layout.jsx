@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useApp } from "../store";
+import ActivityOrb from "./ActivityOrb";
 
 // ============ 模块导航(最左侧竖排导航栏) ============
 const NAV_ITEMS = [
@@ -59,6 +60,9 @@ export default function Layout() {
         </header>
         <Outlet />
       </div>
+
+      {/* 过程指示器:忙时报"在做什么",点开看每一步的完整提示词。挂在外壳上,四个页面通用 */}
+      <ActivityOrb />
     </div>
   );
 }
