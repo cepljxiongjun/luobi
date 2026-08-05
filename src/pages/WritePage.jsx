@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useApp } from "../store";
 import { MODELS } from "../lib/api";
@@ -6,6 +6,8 @@ import { PLATFORMS, TONES, QUICK_ACTIONS, INLINE_ACTIONS, customAction } from ".
 import { scopeLabels, describe } from "../lib/skills";
 import Fold from "../components/Fold";
 import RefsPanel from "../components/RefsPanel";
+import HotBoard from "../components/HotBoard";
+import { diffSegments, diffStats } from "../lib/diff";
 import SelectionToolbar from "../components/SelectionToolbar";
 import ContextMenu from "../components/ContextMenu";
 import AcceptBar from "../components/AcceptBar";
@@ -27,8 +29,21 @@ export default function WritePage() {
     skills, skillSummary, skillPlan, toggleSkill, skillAction,
     webSummary, webOn, refsLoading, searchRefs, webReady,
     inspo, inspoLoading, inspoError, inspoField, genTopicIdeas, pickTopicIdea, clearInspo,
+    snaps, snapshotNow, restoreSnapshot, deleteSnapshot,
   } = useApp();
   const [inspoInput, setInspoInput] = useState(""); // 选题灵感的领域词输入
+  const [compareId, setCompareId] = useState(null); // 正在对比的历史快照 id
+
+  // 版本对比:快照(旧)vs 当前正文(新),句级 diff
+  const compareSnap = snaps.find(s => s.id === compareId) || null;
+  const diff = useMemo(
+    () => (compareSnap ? diffSegments(compareSnap.content, content) : null),
+    [compareSnap, content]);
+  const dstat = diff ? diffStats(diff) : null;
+  const fmtSnapTime = (ts) => {
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
   const [modelMenuOpen, setModelMenuOpen] = useState(false); // 主题卡片里的模型下拉菜单
   const [sel, setSel] = useState(null);         // 正文选区 {start,end}|null
   const [anchor, setAnchor] = useState(null);   // 浮条/接受条锚点(正文卡片相对坐标)
@@ -202,12 +217,17 @@ export default function WritePage() {
           </div>
         </section>
 
-        {/* 选题灵感(对标易撰的热点选题):不知道写什么时,从当下讨论里挑一个 */}
-        <Fold title="选题灵感" summary={inspo.length ? `${inspo.length} 个选题 · ${inspoField}` : (webReady ? "从热点里找选题" : "需联网")}>
+        {/* 选题灵感(对标易撰):全网热榜(免 Key)+ 按领域找选题角度(需搜索源) */}
+        <Fold title="选题灵感" summary={inspo.length ? `${inspo.length} 个选题 · ${inspoField}` : "热榜 + 找选题"}>
+          <div className="flex flex-col gap-2.5">
+            {/* 热榜面板:挂载即拉取,免 Key,不依赖搜索源配置 */}
+            <HotBoard />
+            <div className="h-px bg-line" />
+
           {!webReady ? (
             <div className="text-[11px] leading-relaxed text-ink-faint">
-              选题灵感需要联网检索当下讨论。到「设置 → 联网搜索」配好搜索源,
-              这里就能按领域出带切入角度的选题。
+              想让 AI 从讨论里提炼<b>选题角度</b>?到「设置 → 联网搜索」配好搜索源,
+              这里输入领域词就能出带切入角度的选题卡。
             </div>
           ) : (
             <div className="flex flex-col gap-2">
@@ -251,6 +271,7 @@ export default function WritePage() {
               )}
             </div>
           )}
+          </div>
         </Fold>
 
         {/* 联网资料:AI 查到了什么必须是可见、可否决的,否则用户没法判断稿子可不可信 */}
@@ -309,6 +330,55 @@ export default function WritePage() {
               className={btnCls + " shrink-0 rounded-full px-3 py-1 text-xs"}>
               管理技能 →
             </button>
+          </div>
+        </Fold>
+
+        {/* 历史版本:AI 每次改稿前自动留档(持久化),可对比、可回到任意一版。
+            与 ↩ 撤销是两层:撤销是"刚才那步反悔",这里是"改废了想回三天前那版" */}
+        <Fold title="历史版本" summary={snaps.length ? `${snaps.length} 个快照` : "AI 改稿前自动留档"}>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <span className="flex-1 text-[11px] leading-relaxed text-ink-faint">
+                AI 改稿前自动留一版,最多 20 版
+              </span>
+              <button onClick={snapshotNow} disabled={!content && !docTitle}
+                title="把当前正文手动存为一版"
+                className={btnCls + " shrink-0 rounded-full px-2.5 py-1 text-[11px]"}>
+                存一版
+              </button>
+            </div>
+            {snaps.length === 0 ? (
+              <div className="text-[11px] leading-relaxed text-ink-faint">
+                还没有快照。落笔或改写时会自动留档;也可以点「存一版」手动存。
+              </div>
+            ) : snaps.map(s => {
+              const words = s.content.replace(/\s/g, "").length;
+              const comparing = compareId === s.id;
+              return (
+                <div key={s.id}
+                  className={"rounded-md border px-2.5 py-2 transition-all " +
+                    (comparing ? "border-indigo bg-indigo-bg" : "border-line bg-white")}>
+                  <div className="flex items-baseline gap-2">
+                    <span className={"min-w-0 flex-1 truncate text-[12px] font-semibold " + (comparing ? "text-indigo" : "text-ink")}>
+                      {s.label || "快照"}
+                    </span>
+                    <span className="shrink-0 text-[10px] text-ink-faint">{fmtSnapTime(s.at)}</span>
+                  </div>
+                  <div className="mt-0.5 truncate text-[10px] text-ink-faint">
+                    {(s.docTitle || s.content.slice(0, 24)) + ` · ${words} 字`}
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <button onClick={() => setCompareId(comparing ? null : s.id)}
+                      className={btnCls + " rounded-full px-2.5 py-px text-[10px]"}>
+                      {comparing ? "收起对比" : "对比"}
+                    </button>
+                    <button onClick={() => { deleteSnapshot(s.id); if (comparing) setCompareId(null); }}
+                      aria-label="删除这个快照"
+                      className="ml-auto shrink-0 cursor-pointer border-none bg-transparent px-0.5 text-[12px] leading-none text-ink-faint hover:text-seal">×</button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </Fold>
       </aside>
@@ -467,6 +537,41 @@ export default function WritePage() {
             {copied ? "已复制 ✓" : "复制全文"}
           </button>
         </div>
+
+        {/* 版本对比:快照(旧)vs 当前(新),句级红线稿。删除线 = 那版有现在删了,靛蓝 = 现在新增 */}
+        {compareSnap && diff && (
+          <div className="rounded-[10px] border border-line bg-paper-deep p-4">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className={sectionLabelCls}>版本对比</span>
+              <span className="text-xs font-semibold text-ink">{compareSnap.label || "快照"}</span>
+              <span className="text-[11px] text-ink-faint">
+                {fmtSnapTime(compareSnap.at)} · {compareSnap.content.replace(/\s/g, "").length} 字 → 当前 {content.replace(/\s/g, "").length} 字
+              </span>
+              {dstat && (dstat.addSeg + dstat.delSeg > 0
+                ? <span className="text-[11px] text-ink-faint">新增 {dstat.addChars} 字 · 删去 {dstat.delChars} 字</span>
+                : <span className="text-[11px] text-ink-faint">与当前一字不差</span>)}
+              <button onClick={() => { if (restoreSnapshot(compareSnap.id)) setCompareId(null); }} disabled={busy}
+                title="正文回到这一版(当前内容会先自动留档,可撤销)"
+                className="ml-auto shrink-0 cursor-pointer rounded-full border-none bg-indigo px-3.5 py-1 text-xs text-white transition-opacity enabled:hover:opacity-85 disabled:cursor-default disabled:opacity-45">
+                恢复此版本
+              </button>
+              <button onClick={() => setCompareId(null)}
+                className={btnCls + " shrink-0 rounded-full px-3 py-1 text-xs"}>
+                关闭
+              </button>
+            </div>
+            <div className="mt-2.5 max-h-[260px] overflow-y-auto rounded-md border border-line bg-white px-4 py-3 text-[13px] leading-loose whitespace-pre-wrap">
+              {diff.map((seg, i) => seg.type === "same"
+                ? <span key={i}>{seg.text}</span>
+                : seg.type === "del"
+                  ? <span key={i} className="bg-paper-deep text-ink-faint line-through">{seg.text}</span>
+                  : <span key={i} className="bg-indigo-bg text-indigo">{seg.text}</span>)}
+            </div>
+            <div className="mt-1.5 text-[10px] text-ink-faint">
+              删除线 = 那一版有、当前已删;靛蓝 = 当前新增。「恢复此版本」前会自动把当前内容留档。
+            </div>
+          </div>
+        )}
 
         {/* 写作大纲:可增删改与调序,确认后按大纲成文 */}
         {outline.length > 0 && (

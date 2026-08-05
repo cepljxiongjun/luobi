@@ -195,20 +195,26 @@ export async function saveArticlesDb(list) {
 // 读进模块级 lastWritten,而草稿键不在设置快照里,下一次 saveSettingsDb 的 prune
 // (「快照里已经没有的键要清掉」)就会把草稿行删掉。表分开,两套写入逻辑互不知情。
 
-export async function loadDraftDb() {
+async function kvGet(id) {
   const db = await getDb();
-  const rows = await db.select("SELECT value FROM drafts WHERE id = 'current'");
+  const rows = await db.select("SELECT value FROM drafts WHERE id = $1", [id]);
   if (!rows?.length) return null;
   try { return JSON.parse(rows[0].value); } catch { return null; /* 坏行当没有,不毁启动 */ }
 }
 
-export async function saveDraftDb(obj) {
+async function kvSet(id, obj) {
   const db = await getDb();
   await db.execute(
-    "INSERT INTO drafts (id, value) VALUES ('current', $1) ON CONFLICT(id) DO UPDATE SET value = excluded.value",
-    [JSON.stringify(obj ?? null)],
+    "INSERT INTO drafts (id, value) VALUES ($1, $2) ON CONFLICT(id) DO UPDATE SET value = excluded.value",
+    [id, JSON.stringify(obj ?? null)],
   );
 }
+
+export const loadDraftDb = () => kvGet("current");
+export const saveDraftDb = (obj) => kvSet("current", obj);
+// 历史快照(版本对比用)与草稿同表不同行:同样是"会话工作区"性质的数据
+export const loadSnapsDb = () => kvGet("history");
+export const saveSnapsDb = (obj) => kvSet("history", obj);
 
 // ---- 一次性迁移:把旧的 tauri-plugin-store JSON 搬进来 ----
 // **迁移永不破坏性**:settings.json 一个字都不删,留着当安全网。

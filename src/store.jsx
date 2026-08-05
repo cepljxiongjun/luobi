@@ -7,7 +7,9 @@ import { parseSkillFile, selectSkills, renderSkillsBlock, skillAction,
 import { IT_THEMES, IT_RATIOS, IT_FONT_SIZES, localSplitCards, normalizeCards, drawCardCanvas } from "./lib/cards";
 import { SEARCH_PROVIDERS, SEARCH_FRESHNESS, searchConfigured, webSearch, readUrl,
   selectRefs, renderRefsBlock, renderSourceList, REF_TEXT_MAX } from "./lib/websearch";
-import { loadSettings, saveSettings, saveArticles, loadSkills, saveSkills, loadDraft, saveDraft } from "./lib/storage";
+import { loadSettings, saveSettings, saveArticles, loadSkills, saveSkills,
+  loadDraft, saveDraft, loadSnaps, saveSnaps } from "./lib/storage";
+import { fetchHotBoards } from "./lib/hotboard";
 import { readAll, syncAll, setSynced, firstSyncedFile, pickDir, revealDir, migrate } from "./lib/articlesFs";
 
 // 全局状态:草稿、API 配置、技能、图文卡片都放在这里,
@@ -76,6 +78,19 @@ export function AppProvider({ children }) {
 
   // ---- AI 操作撤销栈(只记 AI 修改正文前的快照,手动输入靠浏览器原生撤销) ----
   const [history, setHistory] = useState([]); // [{content, docTitle}],栈顶在末尾,上限 10
+
+  // ---- 历史快照(持久化,版本对比用):AI 改稿前自动留一版,也可手动「存一版」 ----
+  // 与内存撤销栈是两层:撤销栈是"刚才那步反悔"(10 步,刷新即失),
+  // 快照是"这稿改废了想回三天前那版"(20 版,落盘,带 diff 对比)
+  const [snaps, setSnaps] = useState([]);      // [{id, at, label, docTitle, content}],新的在前
+  const snapsRef = useRef([]);                 // 同 refsRef:pushHistory 连发时 state 是旧的
+  const putSnaps = (next) => { snapsRef.current = next; setSnaps(next); };
+
+  // ---- 全网热榜(选题灵感的数据源,免 Key) ----
+  const [hotBoards, setHotBoards] = useState([]); // [{id, name, items:[{title, heat, url}]}]
+  const [hotLoading, setHotLoading] = useState(false);
+  const [hotError, setHotError] = useState("");
+  const [hotAt, setHotAt] = useState(0);          // 上次拉取时间,10 分钟内不重复拉
 
   // ---- 流式输出:正文类生成边收边写(个别服务不支持时 callAIStream 自动退回一次性) ----
   const [streamEnabled, setStreamEnabled] = useState(true);
@@ -204,6 +219,20 @@ export function AppProvider({ children }) {
           if (it.cards) { const c = normalizeCards(it.cards); if (c) setItCards(c); }
         }
       } catch { /* 草稿坏了就当没有,绝不因此打不开应用 */ }
+
+      // 历史快照:与草稿同表不同行,坏了同样只是没有历史,不碍写作
+      try {
+        const sn = await loadSnaps();
+        if (Array.isArray(sn?.items)) {
+          putSnaps(sn.items
+            .filter(x => x && typeof x.id === "string" && typeof x.content === "string")
+            .slice(0, 20)
+            .map(x => ({
+              id: x.id, at: Number(x.at) || 0, label: String(x.label || "").slice(0, 20),
+              docTitle: String(x.docTitle || ""), content: x.content,
+            })));
+        }
+      } catch { /* 同上 */ }
       setDraftReady(true);
     });
   }, []);
@@ -467,6 +496,29 @@ export function AppProvider({ children }) {
     } catch (e) { traceEnd(id, { error: e.message || "调用失败" }); throw e; }
   };
 
+  // ---- 全网热榜:免 Key 的公开聚合接口,10 分钟内不重复拉 ----
+  // 互斥与缓存判断都走 ref 而不是 state:StrictMode 会把挂载 effect 双跑,
+  // 两次调用同一帧到达时 setState 还没生效,靠 state 拦不住并发的第二发
+  const hotBusyRef = useRef(false);
+  const hotAtRef = useRef(0);
+  const fetchHot = async (force = false) => {
+    if (hotBusyRef.current) return;
+    if (!force && hotAtRef.current && Date.now() - hotAtRef.current < 10 * 60 * 1000) return;
+    hotBusyRef.current = true;
+    setHotError(""); setHotLoading(true);
+    const t = traceStart("web", "拉取全网热榜", { query: "微博 / 知乎 / 头条 / 百度 / 抖音 / B站" });
+    try {
+      const boards = await fetchHotBoards();
+      traceEnd(t, { detail: { results: boards.map(b => ({
+        title: `${b.name}榜 · ${b.items.length} 条`, url: b.items[0]?.url || "", site: b.name, date: "" })) } });
+      setHotBoards(boards);
+      hotAtRef.current = Date.now();
+      setHotAt(hotAtRef.current);
+    } catch (e) { traceEnd(t, { error: e.message }); setHotError(e.message || "热榜获取失败"); }
+    hotBusyRef.current = false;
+    setHotLoading(false);
+  };
+
   // ---- 选题灵感(对标易撰的热点选题):领域词 → 检索当下讨论 → 提炼成选题卡 ----
   // 检索结果刻意不进 refs 面板:它们是"写什么"的素材,不是"怎么写"的资料,
   // 混进去会污染落笔时注入的内容。用户点了某个选题后,现有的自动检索会按
@@ -592,7 +644,7 @@ export function AppProvider({ children }) {
   const insertSources = () => {
     const list = renderSourceList(refsRef.current);
     if (!list) return;
-    pushHistory();
+    pushHistory("插入参考来源前");
     setContent(content.trim() ? `${content.trim()}\n\n${list}` : list);
   };
 
@@ -718,9 +770,44 @@ export function AppProvider({ children }) {
     setCustomApiModel(p.activeModel && models.includes(p.activeModel) ? p.activeModel : (models[0] || ""));
   };
 
-  // ---- 撤销:AI 修改正文前压栈,可一键回退 ----
-  const pushHistory = () => {
+  // ---- 历史快照:AI 改稿前自动留一版(持久化),内容没变不堆版本 ----
+  const SNAP_MAX = 20;
+  const addSnapshot = (label) => {
+    if (!content.trim() && !docTitle.trim()) return;
+    const last = snapsRef.current[0];
+    if (last && last.content === content && last.docTitle === docTitle) return;
+    const snap = {
+      id: `v-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      at: Date.now(), label: String(label || "修改前").slice(0, 20), docTitle, content,
+    };
+    const next = [snap, ...snapsRef.current].slice(0, SNAP_MAX);
+    putSnaps(next);
+    saveSnaps({ v: 1, items: next }); // 快照是低频事件,直接落盘不防抖
+  };
+
+  // 手动「存一版」:只进快照,不进撤销栈(往栈里压一份与当前一模一样的内容,
+  // 会让下一次 ↩ 撤销看起来"没反应")
+  const snapshotNow = () => addSnapshot("手动存档");
+
+  const restoreSnapshot = (id) => {
+    const s = snapsRef.current.find(x => x.id === id);
+    if (!s) return false;
+    pushHistory("恢复历史版本前"); // 恢复本身也可撤销、也留档
+    setDocTitle(s.docTitle || "");
+    setContent(s.content || "");
+    return true;
+  };
+
+  const deleteSnapshot = (id) => {
+    const next = snapsRef.current.filter(x => x.id !== id);
+    putSnaps(next);
+    saveSnaps({ v: 1, items: next });
+  };
+
+  // ---- 撤销:AI 修改正文前压栈,可一键回退;label 顺手喂给持久快照 ----
+  const pushHistory = (label) => {
     setHistory(prev => [...prev, { content, docTitle }].slice(-10));
+    addSnapshot(label);
   };
   const undoLast = () => {
     const last = history[history.length - 1];
@@ -798,7 +885,7 @@ export function AppProvider({ children }) {
 
   const generate = async () => {
     if (!topic.trim()) { setError("先写下你想聊的主题"); return; }
-    if (content.trim() || docTitle.trim()) pushHistory(); // 覆盖已有内容前留快照,可撤销
+    if (content.trim() || docTitle.trim()) pushHistory("重新落笔前"); // 覆盖已有内容前留快照,可撤销
     setError(""); setLoading("gen"); setTitles([]); setDocTitle("");
     setCurrentArticleId(null); // 新生成的是新文章,保存时不覆盖旧文
     try {
@@ -843,7 +930,7 @@ export function AppProvider({ children }) {
   const writeFromOutline = async () => {
     const secs = outline.filter(s => s.heading.trim() || s.note.trim());
     if (secs.length === 0) { setError("大纲是空的,先生成或手动添加小节"); return; }
-    if (content.trim() || docTitle.trim()) pushHistory();
+    if (content.trim() || docTitle.trim()) pushHistory("按大纲成文前");
     setError(""); setLoading("gen"); setTitles([]);
     setCurrentArticleId(null);
     try {
@@ -867,7 +954,7 @@ export function AppProvider({ children }) {
       Number.isInteger(sel.start) && Number.isInteger(sel.end) &&
       sel.start >= 0 && sel.start < sel.end && sel.end <= content.length;
     setError(""); setLoading(action.id);
-    pushHistory(); // 流式会边写边改正文,快照必须先留;中途失败也能撤销回改前状态
+    pushHistory(`${action.name}前`); // 流式会边写边改正文,快照必须先留;中途失败也能撤销回改前状态
     let out = null;
     try {
       if (selValid) {
@@ -958,7 +1045,7 @@ export function AppProvider({ children }) {
       setCheckReport(r => ({ ...r, issues: r.issues.map((x, i) => i === idx ? { ...x, lost: true } : x) }));
       return;
     }
-    pushHistory();
+    pushHistory("应用检查建议前");
     const next = content.replace(issue.excerpt, issue.suggestion);
     setContent(next);
     setCheckedContent(next); // 应用建议是报告自身的修复,不让报告因此过期
@@ -1146,8 +1233,11 @@ export function AppProvider({ children }) {
     checkReport, checkStale, runCheck, applyIssue, dismissIssue,
     // 过程留痕
     trace, activity, clearTrace,
-    // 选题灵感
+    // 选题灵感 / 全网热榜
     inspo, inspoLoading, inspoError, inspoField, genTopicIdeas, pickTopicIdea, clearInspo,
+    hotBoards, hotLoading, hotError, hotAt, fetchHot,
+    // 历史快照
+    snaps, snapshotNow, restoreSnapshot, deleteSnapshot,
     // 联网:配置 / 资料
     searchProvider, setSearchProvider, searchKey, setSearchKey,
     searchCount, setSearchCount, searchFreshness, setSearchFreshness,
