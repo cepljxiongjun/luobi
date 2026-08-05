@@ -58,6 +58,20 @@ fn migrations() -> Vec<Migration> {
       CREATE INDEX IF NOT EXISTS idx_articles_updated ON articles(updated_at DESC);
     ",
     kind: MigrationKind::Up,
+  },
+  // 草稿(未保存的工作状态):单行 KV。**必须是独立表,不能塞进 settings**——
+  // 前端 loadSettingsDb 会把整张 settings 表读进 diff 快照,而草稿键不在设置
+  // 快照里,下一次保存设置时的 prune(「快照里没有的键要清掉」)就会把草稿删掉
+  Migration {
+    version: 3,
+    description: "create drafts table",
+    sql: "
+      CREATE TABLE IF NOT EXISTS drafts (
+        id    TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    ",
+    kind: MigrationKind::Up,
   }]
 }
 
