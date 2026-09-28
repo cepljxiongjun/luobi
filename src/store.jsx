@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { MODELS, callAI, callAIStream, isTauri } from "./lib/api";
 import { PLATFORMS, TONES } from "./lib/presets";
 import { parseSkillFile, selectSkills, renderSkillsBlock, skillAction,
@@ -11,6 +11,7 @@ import { loadSettings, saveSettings, saveArticles, loadSkills, saveSkills,
   loadDraft, saveDraft, loadSnaps, saveSnaps } from "./lib/storage";
 import { fetchHotBoards } from "./lib/hotboard";
 import { readAll, syncAll, setSynced, firstSyncedFile, pickDir, revealDir, migrate } from "./lib/articlesFs";
+import { pickSkillsDir as pickSkillsFolder, scanSkillsDir, watchSkillsDir, revealSkill, isFolderSkill } from "./lib/skillsFs";
 
 // 全局状态:草稿、API 配置、技能、图文卡片都放在这里,
 // 页面(路由)切换时组件卸载,但状态保留,回来草稿还在
@@ -61,6 +62,15 @@ export function AppProvider({ children }) {
   // ---- 写作技能 ----
   // 初值先给内置(带默认启用),水合完成后再换成合并了用户偏差的版本
   const [skills, setSkills] = useState(() => unpackSkills(null));
+  // 技能文件夹(仅桌面端):文件夹里的技能只读,**不进 skills state、不进 packSkills**——
+  // 否则它们会被当成自建技能存进 SQLite,下次启动与文件夹里的同一份重复。
+  // 开关只存偏差:skillsDirOff 是被关掉的相对路径,新放进来的文件默认启用(= 放入即生效)
+  const [skillsDir, setSkillsDir] = useState("");
+  const [skillsDirOff, setSkillsDirOff] = useState([]);
+  const [folderRaw, setFolderRaw] = useState([]);         // 扫描结果(未叠加开关)
+  const [folderError, setFolderError] = useState("");
+  const [folderNote, setFolderNote] = useState("");
+  const [folderBusy, setFolderBusy] = useState(false);
   const [skillsReady, setSkillsReady] = useState(false);
   const skillsTimer = useRef(null);
 
@@ -155,6 +165,8 @@ export function AppProvider({ children }) {
         if (SEARCH_FRESHNESS.some(f => f.id === s.searchFreshness)) setSearchFreshness(s.searchFreshness);
         if (typeof s.readerKey === "string") setReaderKey(s.readerKey);
         if (typeof s.webEnabled === "boolean") setWebEnabled(s.webEnabled);
+        if (isTauri && typeof s.skillsDir === "string") setSkillsDir(s.skillsDir);
+        if (Array.isArray(s.skillsDirOff)) setSkillsDirOff(s.skillsDirOff.filter(x => typeof x === "string").slice(0, 200));
         if (MODELS.some(m => m.id === s.modelId)) setModelId(s.modelId);
         if (typeof s.customModel === "string") setCustomModel(s.customModel);
         if (typeof s.itSignature === "string") setItSignature(s.itSignature);
@@ -262,12 +274,14 @@ export function AppProvider({ children }) {
     // 重新给 fs 运行时 scope 授权的(运行时 scope 不持久化,见 src-tauri/src/lib.rs)
     const snapshot = { apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
       modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir,
-      searchProvider, searchKey, searchCount, searchFreshness, readerKey, webEnabled };
+      searchProvider, searchKey, searchCount, searchFreshness, readerKey, webEnabled,
+      skillsDir, skillsDirOff };
     saveTimer.current = setTimeout(() => saveSettings(snapshot), 300);
     return () => clearTimeout(saveTimer.current);
   }, [hydrated, apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
     modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir,
-    searchProvider, searchKey, searchCount, searchFreshness, readerKey, webEnabled]);
+    searchProvider, searchKey, searchCount, searchFreshness, readerKey, webEnabled,
+    skillsDir, skillsDirOff]);
 
   // ---- 技能库持久化:独立键,与设置互不干扰 ----
   useEffect(() => {
@@ -283,6 +297,50 @@ export function AppProvider({ children }) {
     skillsTimer.current = setTimeout(() => saveSkills(packSkills(skills)), 300);
     return () => clearTimeout(skillsTimer.current);
   }, [skillsReady, skills]);
+
+  // ---- 技能文件夹:扫描 + 原生监听 + 聚焦补扫 ----
+  // 三道触发各有分工:watch 管"放进去立刻生效";窗口聚焦补扫兜网盘/网络盘上
+  // notify 不触发的情况;手动「重新扫描」给用户一个确定的出口。
+  // 多个触发可能重叠(保存一次文件常连发几个事件),用序号只认最后一次扫描的结果
+  const scanSeq = useRef(0);
+  const rescanSkills = async (dir = skillsDir) => {
+    if (!dir) { setFolderRaw([]); setFolderError(""); setFolderNote(""); return; }
+    const seq = ++scanSeq.current;
+    const r = await scanSkillsDir(dir);
+    if (seq !== scanSeq.current) return; // 已有更新的一轮扫描,这份结果作废
+    setFolderRaw(r.items);
+    setFolderError(r.error || "");
+    setFolderNote(r.note || "");
+  };
+
+  useEffect(() => {
+    if (!hydrated || !skillsDir) { setFolderRaw([]); return; }
+    let alive = true;
+    let unwatch = () => {};
+    rescanSkills(skillsDir);
+    watchSkillsDir(skillsDir, () => { if (alive) rescanSkills(skillsDir); })
+      .then(fn => { if (alive) unwatch = fn; else fn(); });
+    const onFocus = () => rescanSkills(skillsDir);
+    window.addEventListener("focus", onFocus);
+    return () => { alive = false; unwatch(); window.removeEventListener("focus", onFocus); };
+  }, [hydrated, skillsDir]);
+
+  const pickSkillsDir = async () => {
+    setFolderBusy(true);
+    try {
+      const dir = await pickSkillsFolder();
+      if (!dir) return; // 用户取消
+      // 换了文件夹,旧的开关偏差对不上新文件了,清掉
+      if (dir !== skillsDir) setSkillsDirOff([]);
+      setSkillsDir(dir);
+    } catch (e) {
+      setFolderError(`选择文件夹失败:${(e?.message || "").slice(0, 80)}`);
+    } finally { setFolderBusy(false); }
+  };
+
+  // 停用技能文件夹:只是不再读它,文件一个不动
+  const clearSkillsDir = () => { setSkillsDir(""); setSkillsDirOff([]); setFolderError(""); setFolderNote(""); };
+  const revealFolderSkill = (id) => revealSkill(skillsDir, id?.startsWith("fs:") ? id.slice(3) : "");
 
   // ---- 文章库持久化:变更后防抖增量同步(水合在上面那条设置链里) ----
   const [articlesReady, setArticlesReady] = useState(false);
@@ -402,7 +460,13 @@ export function AppProvider({ children }) {
   // 汇总当前 API 配置,传给调用层
   const apiConfig = () => ({ mode: apiMode, format: apiFormat, host: apiHost, key: apiKey, model: activeModel });
 
-  const enabledSkills = skills.filter(s => s.enabled);
+  // 文件夹技能叠上开关后与应用内技能合流:筛选、注入、展示都用 allSkills
+  const folderSkills = useMemo(
+    () => folderRaw.map(s => ({ ...s, enabled: !skillsDirOff.includes(s.path) })),
+    [folderRaw, skillsDirOff]);
+  const allSkills = useMemo(() => [...skills, ...folderSkills], [skills, folderSkills]);
+
+  const enabledSkills = allSkills.filter(s => s.enabled);
 
   // 折叠面板/下拉收起时显示的状态摘要
   const modelSummary = apiMode === "custom"
@@ -411,14 +475,14 @@ export function AppProvider({ children }) {
 
   // 当前平台下「落笔成文」会实际注入哪些技能:左栏用它显示生效数与超预算提示。
   // 用 draft 当代表性场景——不同操作注入的条数会变,摘要不可能逐个列
-  const skillPlan = selectSkills(skills, { op: "draft", platformId: platform.id });
+  const skillPlan = selectSkills(allSkills, { op: "draft", platformId: platform.id });
   const skillSummary = enabledSkills.length === 0 ? "未启用"
     : `${skillPlan.used.length} 项生效` + (skillPlan.dropped.length ? ` · ${skillPlan.dropped.length} 项超预算` : "");
 
   // 算出当前上下文该注入的技能文本。platformId 可覆盖:图文页的产物恒定是小红书卡片,
   // 与写作页当前选的平台无关,所以那边固定传 "xhs"
   const skillsFor = (op, platformId = platform.id) =>
-    renderSkillsBlock(selectSkills(skills, { op, platformId }).used);
+    renderSkillsBlock(selectSkills(allSkills, { op, platformId }).used);
 
   // ---- 联网:派生值与注入 ----
   // refs 的权威副本另放一份在 ref 里:自动检索完紧接着就要拼提示词,而 setRefs 触发的
@@ -481,7 +545,7 @@ export function AppProvider({ children }) {
     "model", label || OPS[op] || op,
     {
       system, user: prompt, model: activeModel, op,
-      skills: selectSkills(skills, { op, platformId }).used.map(s => s.name),
+      skills: selectSkills(allSkills, { op, platformId }).used.map(s => s.name),
       refs: (webOn && REF_OPS.includes(op)) ? selectRefs(refsRef.current).used.map(r => r.title) : [],
     },
   );
@@ -683,7 +747,15 @@ export function AppProvider({ children }) {
     });
   };
 
-  const toggleSkill = (id) => setSkills(prev => prev.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+  const toggleSkill = (id) => {
+    if (id.startsWith("fs:")) { // 文件夹技能:改写 off 集合,文件本身不动
+      const path = id.slice(3);
+      setSkillsDirOff(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
+      return;
+    }
+    setSkills(prev => prev.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+  };
+  // 文件夹技能不在 skills state 里,这两个对它们天然是空操作——只读就是这么来的
   const removeSkill = (id) => setSkills(prev => prev.filter(s => s.id !== id));
 
   // 新建一条空技能,返回它的 id 供调用方选中
@@ -1263,7 +1335,10 @@ export function AppProvider({ children }) {
     savedProviders, saveProvider, removeProvider, applyProvider,
     activeModel, modelSummary,
     // 技能
-    skills, enabledSkills, skillSummary, skillPlan, importSkills, toggleSkill, removeSkill,
+    skills: allSkills, enabledSkills, skillSummary, skillPlan, importSkills, toggleSkill, removeSkill,
+    // 技能文件夹
+    skillsDir, folderError, folderNote, folderBusy, folderCount: folderRaw.length,
+    pickSkillsDir, clearSkillsDir, rescanSkills, revealFolderSkill, isFolderSkill,
     addSkill, updateSkill, resetBuiltinSkill, restoreBuiltinSkills, exportSkillMd,
     hasDeletedBuiltins: hasDeletedBuiltins(skills), skillsFor, skillAction, selectSkills,
     // 图文

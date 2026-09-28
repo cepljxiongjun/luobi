@@ -303,6 +303,9 @@ export default function WritePage() {
                     {s.builtin && (
                       <span className="shrink-0 rounded-[3px] border border-line px-[5px] py-px text-[10px] text-ink-faint">内置</span>
                     )}
+                    {s.source === "folder" && (
+                      <span className="shrink-0 rounded-[3px] border border-line px-[5px] py-px text-[10px] text-ink-faint">文件夹</span>
+                    )}
                   </div>
                   {/* 副标题用 description 而不是截 content:导入的 SKILL.md 截出来是 frontmatter 残渣 */}
                   <div className="mt-[5px] line-clamp-2 text-[11px] leading-normal text-ink-faint">

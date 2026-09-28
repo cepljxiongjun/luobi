@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../store";
+import { isTauri } from "../lib/api";
 import { PLATFORMS } from "../lib/presets";
 import { ACTION_CHOICES, ACTION_GROUPS, OPS, SKILL_ITEM_MAX, scopeLabels, describe } from "../lib/skills";
 import { chipCls, btnCls, inputCls, sectionLabelCls } from "../ui";
@@ -19,22 +20,32 @@ function toggleAction(actions, choiceId) {
 // 简介输入框留空时,把自动派生的那句放进 placeholder,让用户看得见"留空会变成什么"
 const firstOr = (s, fallback) => describe(s) || fallback;
 
+// 路径中间省略:头尾信息量最大(盘符 / 最后一级目录名),砍中间
+const midEllipsis = (s, max = 30) =>
+  !s || s.length <= max ? (s || "") : `${s.slice(0, max - 16)}…${s.slice(-15)}`;
+
 // 技能库:编写、管理、导入导出写作规范
 export default function SkillsPage() {
   const {
     skills, platform, addSkill, updateSkill, toggleSkill, removeSkill,
     importSkills, resetBuiltinSkill, restoreBuiltinSkills, hasDeletedBuiltins,
     exportSkillMd, selectSkills,
+    skillsDir, folderError, folderNote, folderBusy, isFolderSkill,
+    pickSkillsDir, clearSkillsDir, rescanSkills, revealFolderSkill,
   } = useApp();
+  const [clearConfirm, setClearConfirm] = useState(false); // 停用技能文件夹的两步确认
 
   const [selectedId, setSelectedId] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
   const [copied, setCopied] = useState(false);
   const [fileEl, setFileEl] = useState(null);
 
-  const mine = skills.filter(s => !s.builtin);
+  const mine = skills.filter(s => !s.builtin && !isFolderSkill(s));
+  const folder = skills.filter(isFolderSkill);
   const builtin = skills.filter(s => s.builtin);
   const cur = skills.find(s => s.id === selectedId) || null;
+  // 文件夹技能在应用里只读:事实来源是文件,改动走外部编辑器,保存后监听自动重载
+  const ro = !!cur && isFolderSkill(cur);
 
   // 选中项被删掉后自动落到第一条,避免右栏空白
   useEffect(() => {
@@ -72,7 +83,46 @@ export default function SkillsPage() {
             onChange={e => { importSkills(e.target.files); e.target.value = ""; }} />
         </div>
 
-        {[["我的技能", mine], ["内置技能", builtin]].map(([label, list]) => list.length > 0 && (
+        {/* 技能文件夹:往里丢 .md(或 Agent Skills 的 <名字>/SKILL.md)就生效,外部改完保存自动重载 */}
+        <div className="rounded-[10px] border border-line bg-white px-3 py-2.5">
+          <div className="flex items-baseline gap-2">
+            <span className={"text-[12px] font-semibold " + (skillsDir ? "text-indigo" : "text-ink")}>技能文件夹</span>
+            {!isTauri && <span className="rounded-full bg-paper-deep px-1.5 py-px text-[10px] text-ink-faint">仅桌面端</span>}
+          </div>
+          <div className="mt-1 font-mono text-[10px] break-all text-ink-soft" title={skillsDir || undefined}>
+            {skillsDir ? midEllipsis(skillsDir) : "指定一个文件夹,放进去的 .md 自动成为技能"}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <button onClick={pickSkillsDir} disabled={!isTauri || folderBusy}
+              className={btnCls + " rounded-full px-2.5 py-0.5 text-[11px]"}>
+              {skillsDir ? "换一个…" : "选择文件夹…"}
+            </button>
+            {skillsDir && (
+              <>
+                <button onClick={() => revealFolderSkill("")} className={btnCls + " rounded-full px-2.5 py-0.5 text-[11px]"}>打开</button>
+                <button onClick={() => rescanSkills()} title="重新读取文件夹(平时有改动会自动重载)"
+                  className={btnCls + " rounded-full px-2.5 py-0.5 text-[11px]"}>⟳</button>
+                {clearConfirm ? (
+                  <button onClick={() => { clearSkillsDir(); setClearConfirm(false); }} onBlur={() => setClearConfirm(false)}
+                    className="cursor-pointer rounded-full border border-ink bg-ink px-2.5 py-0.5 text-[11px] text-white transition-opacity hover:opacity-80">
+                    确认停用?文件不删
+                  </button>
+                ) : (
+                  <button onClick={() => setClearConfirm(true)} className={btnCls + " rounded-full px-2.5 py-0.5 text-[11px]"}>停用</button>
+                )}
+              </>
+            )}
+          </div>
+          {folderError && <div className="mt-1.5 text-[11px] leading-relaxed text-seal">{folderError}</div>}
+          {folderNote && !folderError && <div className="mt-1.5 text-[10px] leading-relaxed text-ink-faint">{folderNote}</div>}
+          {skillsDir && !folderError && folder.length === 0 && (
+            <div className="mt-1.5 text-[10px] leading-relaxed text-ink-faint">
+              文件夹里还没有技能。放一个 .md 进去试试,会自动出现在下面。
+            </div>
+          )}
+        </div>
+
+        {[["我的技能", mine], ["文件夹", folder], ["内置技能", builtin]].map(([label, list]) => list.length > 0 && (
           <section key={label}>
             <div className={sectionLabelCls + " mb-2"}>{label} · {list.length}</div>
             <div className="flex flex-col gap-1.5">
@@ -102,6 +152,7 @@ export default function SkillsPage() {
                         <span key={b} className="rounded-full bg-paper-deep px-1.5 py-px text-[10px] text-ink-faint">{b}</span>
                       ))}
                       {s.edited && <span className="rounded-full bg-paper-deep px-1.5 py-px text-[10px] text-ink-faint">已修改</span>}
+                      {s.truncated && <span className="rounded-full bg-paper-deep px-1.5 py-px text-[10px] text-ink-faint">已截断</span>}
                     </div>
                   </button>
                 );
@@ -129,13 +180,28 @@ export default function SkillsPage() {
           </div>
         ) : (
           <>
+            {ro && (
+              <div className="flex items-center gap-2.5 rounded-[10px] border border-line bg-paper-deep px-3.5 py-2.5">
+                <div className="min-w-0 flex-1 text-[12px] leading-relaxed text-ink-soft">
+                  来自技能文件夹 · <span className="font-mono text-[11px]">{cur.path}</span><br />
+                  <span className="text-ink-faint">
+                    这里只读。在 VS Code / Obsidian 里改这个文件,保存后自动生效;左侧勾选框可以单独关掉它。
+                    {cur.truncated && ` 正文超过 ${SKILL_ITEM_MAX} 字符,只注入了前面部分。`}
+                  </span>
+                </div>
+                <button onClick={() => revealFolderSkill(cur.id)} className={btnCls + " shrink-0 rounded-full px-3 py-1 text-xs"}>
+                  在文件夹中显示
+                </button>
+              </div>
+            )}
+
             <div className="flex items-center gap-2">
-              <input value={cur.name} onChange={e => updateSkill(cur.id, { name: e.target.value })}
+              <input value={cur.name} readOnly={ro} onChange={e => updateSkill(cur.id, { name: e.target.value })}
                 className="min-w-0 flex-1 border-none bg-transparent font-serif text-lg font-bold tracking-[1px] text-ink" />
               <span className="shrink-0 text-[11px] text-ink-faint">{liveNote}</span>
             </div>
 
-            <input value={cur.description} onChange={e => updateSkill(cur.id, { description: e.target.value })}
+            <input value={cur.description} readOnly={ro} onChange={e => updateSkill(cur.id, { description: e.target.value })}
               placeholder={firstOr(cur, "一句话说明这条技能干什么(留空会自动取正文首段)")}
               className={inputCls + " font-sans"} />
 
@@ -145,7 +211,7 @@ export default function SkillsPage() {
                 {PLATFORMS.map(p => {
                   const on = !!cur.platforms?.includes(p.id);
                   return (
-                    <button key={p.id}
+                    <button key={p.id} disabled={ro}
                       onClick={() => {
                         const next = on ? (cur.platforms || []).filter(x => x !== p.id) : [...(cur.platforms || []), p.id];
                         updateSkill(cur.id, { platforms: next.length ? next : null });
@@ -162,7 +228,7 @@ export default function SkillsPage() {
                 {ACTION_CHOICES.map(c => {
                   const on = isActionOn(cur.actions, c.id);
                   return (
-                    <button key={c.id} onClick={() => updateSkill(cur.id, { actions: toggleAction(cur.actions, c.id) })}
+                    <button key={c.id} disabled={ro} onClick={() => updateSkill(cur.id, { actions: toggleAction(cur.actions, c.id) })}
                       className={chipCls(on) + " px-2.5 py-1 text-xs " + (on ? "text-indigo" : "text-ink-soft")}>
                       {c.name}
                     </button>
@@ -176,7 +242,7 @@ export default function SkillsPage() {
             </div>
 
             <div className="relative flex min-h-[220px] flex-1 flex-col rounded-[10px] border border-line bg-white">
-              <textarea value={cur.content} onChange={e => updateSkill(cur.id, { content: e.target.value })}
+              <textarea value={cur.content} readOnly={ro} onChange={e => updateSkill(cur.id, { content: e.target.value })}
                 spellCheck={false}
                 placeholder="写下写作规范。好技能的四件套:可数的硬约束、具体的禁用词清单、正例反例配对、输出前自检。"
                 className="box-border min-h-[200px] w-full flex-1 resize-none rounded-[10px] border-none bg-transparent px-4 py-3.5 font-sans text-[13px] leading-relaxed text-ink" />
@@ -198,8 +264,8 @@ export default function SkillsPage() {
                   还原为默认
                 </button>
               )}
-              {/* 删除用墨色不用印泥红:红色锁死在写作页「落笔」按钮上 */}
-              {confirmDel ? (
+              {/* 删除用墨色不用印泥红:红色锁死在写作页「落笔」按钮上;文件夹技能要删去文件夹里删 */}
+              {ro ? null : confirmDel ? (
                 <button onClick={() => { removeSkill(cur.id); setConfirmDel(false); }} onBlur={() => setConfirmDel(false)}
                   className="ml-auto cursor-pointer rounded-full border border-ink bg-ink px-3 py-1 text-xs text-white transition-opacity hover:opacity-80">
                   {cur.builtin ? "确认删除?可再恢复" : "确认删除?"}

@@ -89,7 +89,7 @@ pub fn run() {
         .build(),
     )
     .setup(|app| {
-      restore_articles_dir_scope(app.handle());
+      restore_user_dirs_scope(app.handle());
 
       if cfg!(debug_assertions) {
         app.handle().plugin(
@@ -104,19 +104,19 @@ pub fn run() {
     .expect("error while running tauri application");
 }
 
-/// 启动时把用户选定的文章文件夹重新加进 fs 的运行时 scope。
+/// 启动时把用户选定的两个文件夹重新加进 fs 的运行时 scope:文章文件夹与技能文件夹。
 ///
 /// 为什么必须有这一步:fs 插件的运行时 scope 只活在内存里(tauri::fs::Scope 内部是
 /// Mutex<HashSet<Pattern>>,每次启动重建为空)。选文件夹时 dialog 插件会自动授权,
 /// 但那次授权只对本次运行有效。重启后不补授,前端第一次 readDir 就会 PathForbidden,
-/// 整个文库读不出来。
+/// 整个文库 / 技能文件夹读不出来(watch 命令走同一个 resolve_path 校验,同样会被拦)。
 ///
 /// 设置搬进 SQLite 后,这里也必须跟着从 SQLite 读 —— 继续读 settings.json 会拿到
 /// 空值或旧值,症状就是"重启一次文章全没了"。
 ///
 /// 授权只在 Rust 侧依据已持久化的设置来做,不暴露成 JS 可调的命令——那等于把
 /// "任意目录提权"的开关交给 WebView。
-fn restore_articles_dir_scope(app: &tauri::AppHandle) {
+fn restore_user_dirs_scope(app: &tauri::AppHandle) {
   let Ok(dir) = app.path().app_config_dir() else { return };
   let db_path = dir.join("luobi.db");
   if !db_path.exists() {
@@ -130,21 +130,28 @@ fn restore_articles_dir_scope(app: &tauri::AppHandle) {
     .filename(&db_path)
     .read_only(true)
     .create_if_missing(false);
-  let found = tauri::async_runtime::block_on(async move {
-    let pool = sqlx::SqlitePool::connect_with(opts).await.ok()?;
-    let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = 'articlesDir'")
-      .fetch_optional(&pool)
-      .await
-      .ok()
-      .flatten();
+  let rows: Vec<(String, String)> = tauri::async_runtime::block_on(async move {
+    let Ok(pool) = sqlx::SqlitePool::connect_with(opts).await else { return Vec::new() };
+    let rows = sqlx::query_as(
+      "SELECT key, value FROM settings WHERE key IN ('articlesDir', 'skillsDir')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
     pool.close().await;
-    // 值是 JSON 编码的(与前端写入方式一致),所以要剥一层引号
-    row.and_then(|(v,)| serde_json::from_str::<String>(&v).ok())
+    rows
   });
 
-  if let Some(d) = found.filter(|d| !d.is_empty()) {
-    // recursive = false:只放行目录本身和它的直接子项,我们只在一层里写 .md。
-    // 与前端 open({ directory: true, recursive: false }) 授出的 glob 保持一致
-    let _ = app.fs_scope().allow_directory(&d, false);
+  for (key, value) in rows {
+    // 值是 JSON 编码的(与前端写入方式一致),所以要剥一层引号
+    let Ok(d) = serde_json::from_str::<String>(&value) else { continue };
+    if d.is_empty() {
+      continue;
+    }
+    // 文章:recursive = false,只在一层里写 .md,与前端 open({ recursive: false }) 授出的 glob 一致。
+    // 技能:recursive = true,要读 <名字>/SKILL.md(Agent Skills 标准布局),
+    // 与前端 open({ recursive: true }) 一致。两条路授出同样的 glob
+    let recursive = key == "skillsDir";
+    let _ = app.fs_scope().allow_directory(&d, recursive);
   }
 }
