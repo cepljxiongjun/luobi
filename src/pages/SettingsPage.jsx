@@ -40,6 +40,7 @@ export default function SettingsPage() {
     searchProvider, setSearchProvider, searchKey, setSearchKey,
     searchCount, setSearchCount, searchFreshness, setSearchFreshness,
     readerKey, setReaderKey, webEnabled, setWebEnabled, webReady, searchCfg,
+    researchDepth, setResearchDepth,
   } = useApp();
   const [resetConfirm, setResetConfirm] = useState(false); // 恢复默认存储的两步确认
   const [searchTesting, setSearchTesting] = useState(false);
@@ -374,6 +375,26 @@ export default function SettingsPage() {
                     className="box-border w-full cursor-pointer rounded-md border border-line bg-white px-2.5 py-[7px] font-sans text-xs text-ink">
                     {SEARCH_FRESHNESS.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
                   </select>
+                </div>
+              </div>
+
+              {/* 检索深度:模型读完第一批资料,自己判断缺什么、剔掉无关的,再补搜 */}
+              <div>
+                <div className="mb-1.5 text-[11px] text-ink-faint">检索深度(落笔 / 列大纲 / 图文直出前自动检索时)</div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[{ v: 0, name: "只搜一次", desc: "最省" },
+                    { v: 1, name: "读后补搜 1 轮", desc: "推荐" },
+                    { v: 2, name: "补搜 2 轮", desc: "资料最全" }].map(o => (
+                    <button key={o.v} onClick={() => setResearchDepth(o.v)}
+                      className={chipCls(researchDepth === o.v) + " px-2 py-1.5 text-center"}>
+                      <div className={"text-xs font-semibold " + (researchDepth === o.v ? "text-indigo" : "text-ink")}>{o.name}</div>
+                      <div className="mt-0.5 text-[10px] text-ink-faint">{o.desc}</div>
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-1.5 text-[10px] leading-relaxed text-ink-faint">
+                  每补搜一轮:AI 先读一遍已有资料,剔掉无关的、指出还缺什么,再补搜最多 2 个关键词。
+                  成本是每轮多 1 次模型调用 + 最多 2 次检索;你手动勾选过的资料 AI 不会动。
                 </div>
               </div>
 

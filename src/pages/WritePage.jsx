@@ -487,7 +487,7 @@ export default function WritePage() {
             className="w-[76px] cursor-pointer rounded-lg border-none bg-seal font-serif text-lg font-bold tracking-[3px] text-white [writing-mode:vertical-rl] transition-all
               enabled:hover:bg-seal-dark enabled:active:scale-[.97] disabled:cursor-default disabled:opacity-50
               focus-visible:outline-2 focus-visible:outline-indigo focus-visible:outline-offset-2">
-            {loading === "gen" ? (refsLoading === "search" ? "查资料" : "落墨中") : "落 笔"}
+            {loading === "gen" ? (refsLoading ? "查资料" : "落墨中") : "落 笔"}
           </button>
         </div>
 

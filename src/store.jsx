@@ -45,6 +45,8 @@ export function AppProvider({ children }) {
   const [searchKey, setSearchKey] = useState("");
   const [searchCount, setSearchCount] = useState(5);
   const [searchFreshness, setSearchFreshness] = useState("noLimit");
+  // 检索深度:0 = 只搜一次;1/2 = 模型读完资料后自己补搜几轮。每轮 = 1 次模型调用 + 最多 2 次检索
+  const [researchDepth, setResearchDepth] = useState(1);
   const [readerKey, setReaderKey] = useState("");             // Jina Reader Key(可留空,免 Key 有限额)
   const [webEnabled, setWebEnabled] = useState(false);        // 总开关:关掉后既不自动检索也不注入
   const [refs, setRefs] = useState([]);        // [{id,title,url,snippet,site,date,text,picked,from}]
@@ -163,6 +165,7 @@ export function AppProvider({ children }) {
         if (typeof s.searchKey === "string") setSearchKey(s.searchKey);
         if (Number.isFinite(s.searchCount)) setSearchCount(Math.min(10, Math.max(1, Math.round(s.searchCount))));
         if (SEARCH_FRESHNESS.some(f => f.id === s.searchFreshness)) setSearchFreshness(s.searchFreshness);
+        if ([0, 1, 2].includes(s.researchDepth)) setResearchDepth(s.researchDepth);
         if (typeof s.readerKey === "string") setReaderKey(s.readerKey);
         if (typeof s.webEnabled === "boolean") setWebEnabled(s.webEnabled);
         if (isTauri && typeof s.skillsDir === "string") setSkillsDir(s.skillsDir);
@@ -217,6 +220,9 @@ export function AppProvider({ children }) {
                 site: String(x.site || ""), date: String(x.date || ""),
                 text: String(x.text || "").slice(0, REF_TEXT_MAX),
                 picked: x.picked !== false, from: x.from === "url" ? "url" : "search",
+                q: typeof x.q === "string" ? x.q.slice(0, 200) : "",
+                touched: x.touched === true, followUp: x.followUp === true,
+                dropReason: typeof x.dropReason === "string" ? x.dropReason.slice(0, 120) : "",
               }));
             if (items.length) putRefs(items);
             if (typeof d.refs.query === "string") setRefsQuery(d.refs.query);
@@ -275,13 +281,13 @@ export function AppProvider({ children }) {
     const snapshot = { apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
       modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir,
       searchProvider, searchKey, searchCount, searchFreshness, readerKey, webEnabled,
-      skillsDir, skillsDirOff };
+      skillsDir, skillsDirOff, researchDepth };
     saveTimer.current = setTimeout(() => saveSettings(snapshot), 300);
     return () => clearTimeout(saveTimer.current);
   }, [hydrated, apiMode, apiFormat, apiHost, apiKey, customApiModel, customModels, savedProviders,
     modelId, customModel, streamEnabled, itSignature, itThemeId, itRatioId, itFontId, articlesDir,
     searchProvider, searchKey, searchCount, searchFreshness, readerKey, webEnabled,
-    skillsDir, skillsDirOff]);
+    skillsDir, skillsDirOff, researchDepth]);
 
   // ---- 技能库持久化:独立键,与设置互不干扰 ----
   useEffect(() => {
@@ -545,7 +551,9 @@ export function AppProvider({ children }) {
     "model", label || OPS[op] || op,
     {
       system, user: prompt, model: activeModel, op,
-      skills: selectSkills(allSkills, { op, platformId }).used.map(s => s.name),
+      // 只有 OPS 里的操作才会拼技能块(inspire / research 用的是独立角色,不注入技能);
+      // 对它们也列技能名的话,过程面板就在说假话
+      skills: OPS[op] ? selectSkills(allSkills, { op, platformId }).used.map(s => s.name) : [],
       refs: (webOn && REF_OPS.includes(op)) ? selectRefs(refsRef.current).used.map(r => r.title) : [],
     },
   );
@@ -641,18 +649,21 @@ export function AppProvider({ children }) {
 
   // 检索并把结果**并进**资料列表而不是替换:一个选题常要换几个关键词各搜一次,
   // 后一次把前一次冲掉的话,用户会在两批结果之间反复横跳
-  const searchRefs = async (query) => {
+  // opts.count:补搜只取 3 条(见 deepenRefs),首搜用设置里的条数
+  const searchRefs = async (query, opts = {}) => {
     const q = String(query || "").trim();
     if (!q) { setRefsError("先写下要查什么"); return 0; }
     if (!webReady) { setRefsError("还没有配置联网搜索:请到设置页选择搜索源并填入 Key"); return 0; }
     setRefsError(""); setRefsLoading("search");
     const t = traceStart("web", `检索「${q}」`, {
-      query: q, provider: searchProvider, freshness: searchFreshness, count: searchCount,
+      query: q, provider: searchProvider, freshness: searchFreshness, count: opts.count || searchCount,
     });
     try {
-      const list = await webSearch(q, searchCfg());
+      const list = await webSearch(q, opts.count ? { ...searchCfg(), count: opts.count } : searchCfg());
+      // q:这条来自哪个查询。多轮检索靠它去重"已搜过的关键词",面板靠它标「补搜」
       const stamped = list.map((r, i) => ({
-        ...r, id: `r-${Date.now()}-${i}`, text: "", picked: true, from: "search",
+        ...r, id: `r-${Date.now()}-${i}`, text: "", picked: true, from: "search", q,
+        followUp: !!opts.followUp,
       }));
       const seen = new Set(refsRef.current.map(r => r.url));
       putRefs([...refsRef.current, ...stamped.filter(r => !seen.has(r.url))].slice(0, REF_LIST_MAX));
@@ -699,7 +710,9 @@ export function AppProvider({ children }) {
     finally { setRefsLoading(""); }
   };
 
-  const toggleRef = (id) => putRefs(refsRef.current.map(r => r.id === id ? { ...r, picked: r.picked === false } : r));
+  // touched:用户亲手动过的条目,多轮检索的「剔除无关」永远不碰它——AI 不覆盖人的判断
+  const toggleRef = (id) => putRefs(refsRef.current.map(r => r.id === id
+    ? { ...r, picked: r.picked === false, touched: true } : r));
   const removeRef = (id) => putRefs(refsRef.current.filter(r => r.id !== id));
   const clearRefs = () => { putRefs([]); setRefsError(""); setRefsQuery(""); };
 
@@ -717,7 +730,80 @@ export function AppProvider({ children }) {
   // 检索失败**不阻断写作**,只留下错误提示——联网是增强,不是前置条件
   const autoRefs = async (subject) => {
     if (!webOn || refsRef.current.length > 0) return;
-    await searchRefs(subject);
+    const n = await searchRefs(subject);
+    if (n > 0 && researchDepth > 0) await deepenRefs(subject, researchDepth);
+  };
+
+  // ---- 多轮检索:模型读完现有资料,判断缺什么、剔掉无关的,再自己提下一个查询 ----
+  // 研判只送标题/站点/日期/摘要前 150 字,不送抓回的全文——它要判断的是"覆盖面",
+  // 不是细读,全文送过去只是白花钱
+  const RESEARCH_SNIPPET = 150;
+  const RESEARCH_QUERIES = 2;   // 每轮最多补搜几个查询
+  const RESEARCH_COUNT = 3;     // 补搜每个查询取几条:首搜剔掉几条后,补搜的才挤得进 REF_MAX
+
+  const today = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  // 一轮研判。返回还没搜过的新查询(可能为空 = 够了或研判失败)
+  const planResearch = async (subject) => {
+    const list = refsRef.current;
+    if (list.length === 0) return [];
+    const searched = [...new Set([refsQuery, ...list.map(r => r.q)].filter(Boolean))];
+    const numbered = list.map((r, i) =>
+      `[${i + 1}]${r.picked === false ? "(已停用)" : ""} ${r.title || "(无标题)"}` +
+      `${r.site || r.date ? ` —— ${[r.site, r.date].filter(Boolean).join(" · ")}` : ""}\n` +
+      `${(r.text || r.snippet || "").replace(/\s+/g, " ").slice(0, RESEARCH_SNIPPET)}`).join("\n\n");
+
+    setRefsLoading("research");
+    try {
+      const raw = await runJson("research",
+        `今天是 ${today()}。要写的主题:「${subject}」,发布在${platform.name}。\n` +
+        `已经搜过的关键词:${searched.map(x => `「${x}」`).join("、") || "无"}\n\n` +
+        `下面是目前检索到的资料:\n\n${numbered}\n\n` +
+        `请判断这些资料够不够支撑这篇文章:\n` +
+        `1. 哪几条与主题明显无关、或是营销软文/内容农场,应该剔除(给编号)\n` +
+        `2. 还缺什么关键信息(最新数据、权威来源、反方观点、具体案例……),给出最多 ${RESEARCH_QUERIES} 个**新的**搜索关键词去补,` +
+        `要具体(带时间、机构、数据指标),不要与已搜过的重复;资料已经够用就不要硬凑\n` +
+        `只返回JSON,不要markdown代码块,格式:{"enough":true或false,"drop":[编号],"queries":["关键词"],"gap":"一句话:还缺什么或为什么够了"}`,
+        "你是资料研究员,为自媒体写作核查资料的覆盖面与可信度。判断克制:不确定无关的不剔除,资料够用就直说够用。",
+        platform.id, "补充检索");
+      const data = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      if (!data || typeof data !== "object") throw new Error("返回格式异常");
+
+      // 剔除:只动搜索来的、用户没碰过的、当前仍勾选的
+      const gap = String(data.gap || "").slice(0, 80);
+      const drop = new Set((Array.isArray(data.drop) ? data.drop : [])
+        .map(n => Number(n) - 1).filter(i => Number.isInteger(i) && i >= 0 && i < list.length));
+      if (drop.size) {
+        putRefs(refsRef.current.map((r, i) =>
+          drop.has(i) && r.from === "search" && !r.touched && r.picked !== false
+            ? { ...r, picked: false, dropReason: "AI 判为与主题无关" } : r));
+      }
+
+      if (data.enough) return [];
+      const seen = new Set(searched.map(x => x.trim()));
+      return (Array.isArray(data.queries) ? data.queries : [])
+        .map(q => String(q || "").trim().slice(0, 60))
+        .filter(q => q && !seen.has(q))
+        .slice(0, RESEARCH_QUERIES);
+    } catch (e) {
+      // 研判失败绝不阻断写作:停在这里,用现有资料继续
+      setRefsError(`补充检索未完成,已用现有资料继续(${(e.message || "研判失败").slice(0, 40)})`);
+      return null;
+    } finally { setRefsLoading(""); }
+  };
+
+  // 跑 rounds 轮「研判 → 补搜」。任何一轮说够了、没有新查询、或研判失败,都提前收手
+  const deepenRefs = async (subject, rounds = 1) => {
+    const s = String(subject || "").trim();
+    if (!s || !webReady) return;
+    for (let i = 0; i < rounds; i++) {
+      const queries = await planResearch(s);
+      if (!queries || queries.length === 0) break;
+      for (const q of queries) await searchRefs(q, { count: RESEARCH_COUNT, followUp: true });
+    }
   };
 
   // ---- 写作:动作 ----
@@ -1317,6 +1403,7 @@ export function AppProvider({ children }) {
     webReady, webOn, webSummary, searchCfg,
     refs, refPlan, pickedRefs, refsLoading, refsError, refsQuery, setRefsError,
     searchRefs, addRefByUrl, fetchRefText, toggleRef, removeRef, clearRefs, insertSources,
+    deepenRefs, researchDepth, setResearchDepth,
     // 流式输出 / 大纲先行
     streamEnabled, setStreamEnabled,
     outline, genOutline, writeFromOutline, clearOutline,

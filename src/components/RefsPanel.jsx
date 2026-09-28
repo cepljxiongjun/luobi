@@ -13,6 +13,7 @@ export default function RefsPanel() {
     topic, webReady, webEnabled, setWebEnabled,
     refs, refPlan, refsLoading, refsError, refsQuery, setRefsError,
     searchRefs, addRefByUrl, fetchRefText, toggleRef, removeRef, clearRefs, insertSources,
+    deepenRefs,
   } = useApp();
   const [q, setQ] = useState("");
   const [link, setLink] = useState("");
@@ -65,6 +66,12 @@ export default function RefsPanel() {
           {refsLoading === "read" ? "抓取中…" : "抓取"}
         </button>
       </div>
+
+      {refsLoading === "research" && (
+        <div className="lb-loading text-[11px] text-indigo">
+          AI 在读资料,判断还缺什么<span>。</span><span>。</span><span>。</span>
+        </div>
+      )}
 
       {refsError && (
         <div className="flex items-start gap-2 text-[11px] leading-relaxed text-seal">
@@ -124,6 +131,15 @@ export default function RefsPanel() {
                     {dropped && on && (
                       <span className="rounded-full bg-paper-deep px-1.5 py-px text-[10px] text-ink-faint">超预算未注入</span>
                     )}
+                    {/* 多轮检索的痕迹:补搜来的标出查询词,被 AI 剔掉的标出原因(重新勾上即可否决) */}
+                    {r.followUp && r.q && (
+                      <span className="rounded-full bg-indigo-bg px-1.5 py-px text-[10px] text-indigo" title={`来自补搜「${r.q}」`}>
+                        补搜:{r.q.length > 10 ? r.q.slice(0, 10) + "…" : r.q}
+                      </span>
+                    )}
+                    {!on && r.dropReason && !r.touched && (
+                      <span className="rounded-full bg-paper-deep px-1.5 py-px text-[10px] text-ink-faint">{r.dropReason}</span>
+                    )}
                     {!r.text && (
                       <button onClick={() => fetchRefText(r.id)} disabled={busy}
                         title="抓取这条链接的完整正文,引用具体数据时更可靠"
@@ -137,10 +153,15 @@ export default function RefsPanel() {
             })}
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="flex-1 text-[10px] text-ink-faint">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="basis-full text-[10px] text-ink-faint">
               {refPlan.used.length} 条生效 · 约 {Math.round(refPlan.chars / 100) / 10}k 字符
             </span>
+            <button onClick={() => deepenRefs(topic.trim() || refsQuery, 1)} disabled={busy}
+              title="让 AI 读一遍现有资料:剔掉无关的、指出还缺什么,再补搜一轮"
+              className={btnCls + " shrink-0 rounded-full px-2.5 py-1 text-[11px]"}>
+              {refsLoading === "research" ? "研判中…" : "深挖一轮"}
+            </button>
             <button onClick={insertSources}
               title="把勾选的来源作为清单追加到正文末尾(知乎/公众号常用,小红书一般不需要)"
               className={btnCls + " shrink-0 rounded-full px-2.5 py-1 text-[11px]"}>

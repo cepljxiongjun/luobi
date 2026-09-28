@@ -40,6 +40,7 @@ src/
     textareaRect.js     # 镜像 div 量 textarea 选区坐标(浮条定位 + 选区高亮的地基)
     mdfile.js           # 文章 ↔ 单个 .md 的互转(frontmatter 序列化/容错解析/文件名规则)
     articlesFs.js       # 文章库存储后端路由:自选文件夹(每篇一个 .md) / 应用内部存储
+    skillsFs.js         # 技能文件夹(仅桌面端):扫描根目录 .md 与 <名字>/SKILL.md + 原生监听
     skills.js           # 技能:frontmatter 解析/作用域筛选/注入预算/持久化合并(纯函数)
     builtinSkills.js    # 内置技能库(6 类 15 条纯数据)
     cards.js            # 图文主题/画幅/拆卡算法/canvas 导出
@@ -68,6 +69,11 @@ src/
      - **简介在读取时派生**(`describe(s)`)而不是存下来:存下来的话用户改了正文简介还停在旧内容上
      - **持久化走独立键**(`luobi-skills-v1` / store 的 `skills` 键,不进 settings 快照——settings 是防抖全量写,技能几十 KB 混进去等于每敲一个 Key 字符就重新序列化整包)。内置**只存偏差**:没碰过的自动拿新版、只开关过的保留开关拿新版、编辑过的保留用户版本并标「已修改」(可还原)、删过的立墓碑不复活(可恢复)
      - **点名调用**(对应 Manual 档):右键菜单「⚡ 用技能改写…」,`skillAction(skill)` 的 op 是 `manual`,所以自动技能块为空——点名就只用这一条
+     - **技能文件夹**(2026-09,仅桌面端,`lib/skillsFs.js` + `/skills` 页左栏顶部区块):指一个文件夹,往里放 `.md` 就是一条技能,在 VS Code / Obsidian 里改完保存自动重载
+       - 认两种布局:根目录 `*.md`(`README.md` 除外)+ 一层子目录的 `<名字>/SKILL.md`(Claude Agent Skills 标准布局,可直接 clone 生态仓库;子目录里其它文件不读)。SKILL.md 无 `name` 时回退为目录名。id = `fs:<相对路径>`(分隔符统一 `/`),上限 50 条,正文超 `SKILL_ITEM_MAX` 截断并标「已截断」
+       - **在应用里只读**:只能开关、查看、在文件夹中显示;要改去改文件。**这正是文章文件夹不做监听、技能文件夹却敢做的原因**——文章会在应用里被编辑,外部改动与编辑中的内容没法合并;技能不在应用里写,就没有合并问题
+       - **不进 `skills` state、不进 `packSkills`**:store 里单独一份 `folderRaw`,叠上开关得 `folderSkills`,与应用内技能合流成 `allSkills` 供筛选/注入/展示(context 导出的 `skills` 就是它)。否则文件夹技能会被当成自建技能存进 SQLite,下次启动与文件夹里的同一份重复。`toggleSkill` 对 `fs:` id 改写设置里的 `skillsDirOff`(被关掉的相对路径,只存偏差),`updateSkill`/`removeSkill` 对它们天然是空操作。**新放进来的文件默认启用**(= 放入即生效),注入预算照常兜底;换文件夹时清空 off 集合
+       - 三道重扫触发:plugin-fs 的原生 `watch`(递归、防抖 300ms,事件来了整目录重扫——几十个小文件,比增量 diff 简单可靠)+ **窗口聚焦补扫**(网盘/网络盘上 notify 可能不触发)+ 手动「⟳」。触发会重叠,用序号只认最后一轮扫描的结果
    - **AI 操作撤销**:每次 AI 修改正文前 `pushHistory()` 压栈(上限 10,含 docTitle),操作条「↩ 撤销」回退;手动输入不入栈
    - **历史版本 + 版本对比**(2026-08):`pushHistory(label)` 在压撤销栈的同时挂一份**持久快照**(上限 20,内容没变不堆版本;label 记触发场景如「换种写法前」)。与撤销栈是两层:撤销是"刚才那步反悔"(10 步,刷新即失),快照是"改废了想回三天前那版"(落盘,`drafts` 表 `history` 行 / `luobi-draft-history-v1`)。左栏「历史版本」Fold 列快照(+手动「存一版」,**只进快照不进撤销栈**——压一份一模一样的内容会让下一次 ↩ 看起来没反应);「对比」在右栏出**句级红线稿**(`lib/diff.js`:LCS,按句号/换行切段,分隔符留句尾保证 join 逐字复原;先掐公共前后缀,中段超 4M 格退化成整块删/加不卡死页面),删除线 = 那版有现在删了、靛蓝 = 现在新增;「恢复此版本」前自动把当前内容留档,恢复本身可撤销
    - **键盘快捷键**:`Ctrl/Cmd+S` 保存、`Esc` 逐层关闭(菜单 > 浮条 > 接受条)、`Ctrl/Cmd+Z` **只在接受条还在时**劫持为撤销 AI 改写,其余时刻放行给输入框原生撤销(否则手打的字就撤不了了)
@@ -84,7 +90,7 @@ src/
      - **增量写入**:`articlesFs.js` 模块内的 `synced` 表(id → {file, updatedAt})做 diff,只写变了的那几篇。依赖「任何改动都 bump updatedAt」,所以 `saveArticle` 的时间戳是**严格单调**的(`Math.max(Date.now(), prev+1)`),否则同一毫秒两次保存会被当成没变过而漏写
      - **`synced` 必须放在模块里而不是让 store 传进来**:一次同步没跑完时下一次就可能被排上队,调用方手里的那份必然是旧的,两轮都会把同一篇当成「新建」,于是写出两个重复文件(踩过的坑,有回归用例)
      - **降级不丢文章**:内存里的 articles 永远是工作副本,文件系统只是 sink。写失败/目录失效 → 不清路径(U 盘插回来能自愈)+ 全量写回内部存储兜底 + 报人话错误。迁移永不破坏性,旧的 `articles` 键一个字都不删
-     - 外部改动不做文件监听(要开 cargo feature 拖 notify,且外部改动与正在编辑的内容没有好的合并 UX),改为启动重扫 + 进文章库页重扫 + 手动「⟳ 重新扫描」;冲突时磁盘赢,但正在编辑的那篇不覆盖
+     - 文章文件夹**不做**文件监听(外部改动与正在编辑的内容没有好的合并 UX),改为启动重扫 + 进文章库页重扫 + 手动「⟳ 重新扫描」;冲突时磁盘赢,但正在编辑的那篇不覆盖。(技能文件夹做了监听,因为技能在应用里只读,见上)
      - 没有 frontmatter 的普通 .md 也会被收编(标题取首个 H1 否则取文件名)——文件夹是事实来源,用户丢进去的东西就该出现在文库里
 2. **图文生成页** `/imagetext`(对标 MD2Card / ai-xiaohs / Canva 小红书模板调研结论):
    - **内容来源两种模式**:「已有文章」(手动粘贴或「带入写作草稿」)/「主题直出」(输入主题一键生成整组卡片,不需要现成文章;可选粘贴参考爆款笔记,AI 只仿其结构写法——对标 ai-xiaohs 灵感创作/爆款仿写)
@@ -109,6 +115,13 @@ src/
    - 检索**追加**而不是替换(一个选题常要换几个关键词各搜一次);已有资料时「落笔」不再自动检索(那是用户挑过的);**检索失败不阻断写作**,只留错误提示——联网是增强不是前置条件
    - 「插入参考来源」把勾选的来源作为清单追加到正文末尾,**不自动加**:知乎需要、小红书绝不需要,这个判断只有用户能下
    - `openExternal` 打开原文链接:桌面端 WebView 吞掉 `target="_blank"`,必须走 opener 插件。capabilities 加的是 `opener:allow-open-url` + `opener:allow-default-urls`(只放行 http/https/mailto/tel),**不含 `open-path`**,所以这条通道打不开本地文件
+   - **多轮检索**(2026-09,设置项「检索深度」:只搜一次 / 读后补搜 1 轮〈默认〉/ 2 轮):`autoRefs` 首搜后进 `deepenRefs(subject, rounds)`,每轮 `planResearch` 用 `runJson("research", …, label「补充检索」)` 让「资料研究员」读现有资料,返回 `{enough, drop, queries, gap}` → 剔除无关条目 → 用新关键词补搜
+     - 研判只送标题/站点/日期/摘要前 150 字,**不送全文**(判断的是覆盖面,不是细读);带上**今天日期**(否则模型提不出带时间的查询)与已搜关键词(去重)
+     - **补搜每个查询只取 3 条**:首搜 5 条剔掉一两条后,补搜的才挤得进 `REF_MAX=8`
+     - **AI 永不覆盖用户的勾选**:`toggleRef` 给条目打 `touched`,剔除只动 `from:"search"` 且未 touched 且仍勾选的;被剔的标 `dropReason`,重新勾上即否决
+     - 每条资料记 `q`(来自哪个查询)与 `followUp`(是否补搜),面板标「补搜:…」,随草稿持久化
+     - **研判失败(坏 JSON / 模型报错)不阻断写作**:停止后续轮次,提示「补充检索未完成,已用现有资料继续」;研判说够了就不补搜
+     - 资料面板「深挖一轮」= 手动跑一轮;顶部「⌕ 查资料」仍是单次检索。研判期间 `refsLoading = "research"`,落笔按钮在任何资料活动期间都显示「查资料」
    - Vite 代理的转发头白名单加了 `accept`(Jina 要它才返回结构化正文);Serper 的 `X-API-KEY` 与 Claude 格式头名恰好一致,不用另加
 4. **过程可见**(`components/ActivityOrb.jsx` + store 的 `trace`):右下角常驻悬浮球,AI 在忙时显示「思考中 / 联网中 / 抓取中」+ 当前这一步在做什么,点开是最近 30 步的过程面板
    - **每一步都能展开看原样的请求**:模型步给出「注入了哪几条技能 / 几条资料」的结论,再给系统提示词全文、这次的指令、模型返回;检索步给出搜索源与命中列表(可点开原文);抓取步给出 URL 与抓到的字数
@@ -116,6 +129,7 @@ src/
    - **留痕点收在两个包装函数里**:正文类走 `runProse`,要 JSON 的走 `runJson(op, prompt, system, platformId?, label?)`——所以 store 里不再有裸的 `callAI` 调用,新增功能只要走这两个入口就自动留痕
    - `system` 在 `runProse` 里**只拼一次**:它同时要发给模型和记进面板,拼两次会出现"面板里显示的与实际发出去的不是同一份"这种最难查的偏差
    - `traceRef` 与 `refsRef` 同源:一步的开始与结束之间跨了 `await`,读 state 会读到旧的
+   - **「注入的技能」只对 `OPS` 里的 op 列出**:`inspire`(选题灵感)与 `research`(补充检索)用独立角色、不拼技能块,对它们也列技能名的话面板就在说假话(曾经如此,已修)
    - **设置页的两个「测试连接」故意不留痕**:面板记的是「为了写这篇稿子做了什么」,不是网络活动日志;它们的结果本来就显示在按钮旁边
    - 面板里不含任何 Key(系统提示词与指令里本来就没有),只留最近 30 步,刷新即清空
 5. **模型设置页** `/settings`:接入方式(内置/自定义)、内置模型单选、自定义接入表单(API 格式/Host/Key/模型名),修改即时生效并自动保存本机;写作页模型下拉保留快速切换,「自定义接入…」跳转设置页
@@ -147,8 +161,8 @@ src/
 
 - `src-tauri/`:标准 Tauri 2 工程,标识 `com.luobi.app`,窗口 1240×860
 - HTTP 权限在 `src-tauri/capabilities/default.json`,已放开 http/https 全域
-- 插件:http / store / fs / dialog / opener / **sql(sqlite)**;另直接依赖 `sqlx`(版本与 features 跟 tauri-plugin-sql 对齐,cargo 会统一成一份)用于启动时读 `articlesDir`
-- **fs 的运行时 scope 不持久化**(`tauri::fs::Scope` 内部是内存里的 `Mutex<HashSet<Pattern>>`,每次启动重建为空)。dialog 选目录时会自动 `allow_directory`,但只对那一次运行有效——所以 `lib.rs` 的 `.setup()` 里必须从 settings.json 读回 `articlesDir` 重新授权,否则重启后第一次 `readDir` 就 `PathForbidden`,整个文库读不出来。**授权只在 Rust 侧依据已存设置来做,不暴露成 JS 可调的命令**(那等于把任意目录提权的开关交给 WebView)
+- 插件:http / store / fs(**开了 `watch` feature**,底层 notify;权限 `fs:allow-watch` / `fs:allow-unwatch`,watch 命令走与 readDir 相同的 `resolve_path` scope 校验)/ dialog / opener / **sql(sqlite)**;另直接依赖 `sqlx`(版本与 features 跟 tauri-plugin-sql 对齐,cargo 会统一成一份)用于启动时读 `articlesDir`
+- **fs 的运行时 scope 不持久化**(`tauri::fs::Scope` 内部是内存里的 `Mutex<HashSet<Pattern>>`,每次启动重建为空)。dialog 选目录时会自动 `allow_directory`,但只对那一次运行有效——所以 `lib.rs` 的 `.setup()`(`restore_user_dirs_scope`)必须从 SQLite 读回 `articlesDir`(非递归)与 `skillsDir`(**递归**,要读 `<名字>/SKILL.md`;与前端 `open({ recursive })` 参数一致)重新授权,否则重启后第一次 `readDir` 就 `PathForbidden`,整个文库读不出来。**授权只在 Rust 侧依据已存设置来做,不暴露成 JS 可调的命令**(那等于把任意目录提权的开关交给 WebView)
 - capabilities 里**不配任何 `fs:scope`**:只授命令,scope 全走运行时 = 唯一能读写的就是用户亲自选中的那个目录。不要用 `$HOME/**`(覆盖不到 D 盘/U 盘,又把家目录暴露给 WebView);也不要用 `fs:default`(它带的是 app 专属目录的 allow,与此无关),用 `fs:deny-default` 只取它的 deny
 - 「打开文件夹」用 `opener:allow-reveal-item-in-dir` 而非 `open-path`:后者走 ACL scope 且没有运行时 scope 可扩展,用户任选目录必被拦
 - 命令:`npm run tauri dev`(开发)、`npm run tauri build`(打安装包,产物在 `src-tauri/target/release/bundle/`)
@@ -195,9 +209,8 @@ src/
 
 1. 持久化收尾:Key 进系统钥匙串(草稿/资料/快照/设置/文章/技能均已落盘)
 2. 双模型对比生成(同一主题左右两栏出稿)
-3. 桌面端技能文件夹监听(放入即生效)
-4. 联网:多轮检索(模型读完第一批资料后自己提出下一个查询)
-5. 热榜聚合接口的备用源(当前单一公共接口,挂了只报错;可加第二家做自动切换)
+3. 热榜聚合接口的备用源(当前单一公共接口,挂了只报错;可加第二家做自动切换)
+4. 多轮检索按需抓正文:研判时若判定某条摘要不够,自动抓它的全文(目前「抓正文」仍需手动)
 
 ## Git 工作流
 
